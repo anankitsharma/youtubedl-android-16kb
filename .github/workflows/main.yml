@@ -9,15 +9,11 @@ concurrency:
 
 jobs:
   build-ffmpeg:
-    name: Build FFmpeg (arm64)
+    name: Build FFmpeg (arm64, direct NDK)
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 180
     env:
-      TERMUX_ARCH: aarch64
-      TERMUX_PREFIX: /data/youtubedl-android/usr
-      TERMUX_ANDROID_HOME: /data/youtubedl-android/home
-      MAKEFLAGS: "-j$(nproc)"
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      API: 21
       EXTRA_LDFLAGS: "-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
     steps:
       - uses: actions/checkout@v4
@@ -25,78 +21,84 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y zip unzip dpkg-dev binutils llvm ccache
+          sudo apt-get install -y curl tar xz-utils pkg-config build-essential git nasm yasm llvm
 
-      - name: Restore caches
-        uses: actions/cache@v4
-        with:
-          path: |
-            .ccache
-            termux-packages/.termux-build
-            termux-packages/debs
-            termux-packages/.cache
-          key: ffmpeg-${{ runner.os }}-${{ hashFiles('.github/workflows/main.yml') }}
-          restore-keys: |
-            ffmpeg-${{ runner.os }}-
-
-      - name: Clone Termux packages (shallow)
+      - name: Download FFmpeg source (shallow)
         run: |
-          if [ ! -d termux-packages ]; then
-            git clone --depth 1 https://github.com/termux/termux-packages.git
-          fi
+          curl -L -o ffmpeg.tar.xz https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz
+          mkdir ffmpeg-src && tar -xf ffmpeg.tar.xz -C ffmpeg-src --strip-components=1
 
-      - name: Build FFmpeg
-        working-directory: termux-packages
+      - name: Configure (aarch64, minimal, shared)
+        working-directory: ffmpeg-src
+        env:
+          ANDROID_NDK: ${{ env.ANDROID_NDK }}
         run: |
-          cat > build-ffmpeg.sh << 'EOS'
-          #!/usr/bin/env bash
-          set -euxo pipefail
-          export TERMUX_ARCH=${TERMUX_ARCH}
-          export TERMUX_PREFIX=${TERMUX_PREFIX}
-          export TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME}
-          export CCACHE_DIR=${CCACHE_DIR}
-          export CC="ccache clang"
-          export CXX="ccache clang++"
-          export MAKEFLAGS=${MAKEFLAGS}
+          export NDK=${ANDROID_NDK:-$ANDROID_NDK_LATEST_HOME}
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export TARGET=aarch64-linux-android
+          export API=${API}
+          export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export LD=$TOOLCHAIN/bin/ld.lld
+          export STRIP=$TOOLCHAIN/bin/llvm-strip
+          export NM=$TOOLCHAIN/bin/llvm-nm
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export PKG_CONFIG=false
+          export CFLAGS="-fPIC -O2"
           export LDFLAGS="${LDFLAGS:-} ${EXTRA_LDFLAGS}"
-          ./scripts/run-docker.sh ./clean.sh
-          ./scripts/run-docker.sh env \
-            TERMUX_ARCH=${TERMUX_ARCH} \
-            TERMUX_PREFIX=${TERMUX_PREFIX} \
-            TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} \
-            MAKEFLAGS=${MAKEFLAGS} \
-            LDFLAGS="${LDFLAGS}" \
-            CCACHE_DIR=${CCACHE_DIR} \
-            CC="ccache clang" \
-            CXX="ccache clang++" \
-            ./build-package.sh ffmpeg
-          EOS
-          chmod +x build-ffmpeg.sh
-          ./build-ffmpeg.sh
+          ./configure \
+            --target-os=android \
+            --arch=aarch64 \
+            --enable-cross-compile \
+            --cc=$CC \
+            --cxx=$CXX \
+            --ar=$AR \
+            --nm=$NM \
+            --ranlib=$RANLIB \
+            --strip=$STRIP \
+            --pkg-config=false \
+            --enable-shared \
+            --disable-static \
+            --disable-doc \
+            --disable-debug \
+            --enable-small \
+            --disable-autodetect \
+            --enable-ffmpeg \
+            --enable-ffprobe \
+            --disable-ffplay \
+            --disable-postproc \
+            --disable-avdevice \
+            --disable-filters \
+            --disable-network \
+            --disable-muxers \
+            --disable-encoders \
+            --disable-decoders \
+            --disable-demuxers \
+            --disable-parsers \
+            --enable-muxer=mp4,matroska,webm,segment,concat,adts \
+            --enable-demuxer=mov,matroska,webm,mp3,mp4,ogg,flv,mpegts \
+            --enable-parser=aac,h264,hevc,opus,vorbis,mp3 \
+            --enable-decoder=aac,h264,hevc,opus,vorbis,mp3 \
+            --enable-protocol=file,pipe,concat
 
-      - name: Stage FFmpeg outputs
+      - name: Build
+        working-directory: ffmpeg-src
+        run: |
+          make -j$(nproc)
+
+      - name: Stage outputs
         run: |
           mkdir -p out/jniLibs/arm64-v8a
-          if [ -d termux-packages/debs ]; then
-            find termux-packages/debs -type f -name "*.deb" -print -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/ffmpeg \; || true
-          fi
-          cd $GITHUB_WORKSPACE/out/ffmpeg || exit 0
-          if [ -d data/youtubedl-android/usr/lib ]; then
-            (cd data/youtubedl-android && zip --symlinks -r $GITHUB_WORKSPACE/out/libffmpeg.zip usr/lib)
-            cp $GITHUB_WORKSPACE/out/libffmpeg.zip $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libffmpeg.zip.so
-          fi
-          ffprobe_path=$(find data -type f -name ffprobe 2>/dev/null | head -n1 || true)
-          [ -n "$ffprobe_path" ] && cp "$ffprobe_path" $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libffprobe.so || true
-          if ls data/youtubedl-android/usr/lib/libavcodec*.so >/dev/null 2>&1; then
-            cp data/youtubedl-android/usr/lib/libavcodec*.so $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libffmpeg.so || true
-          fi
+          cp ffmpeg-src/ffmpeg out/jniLibs/arm64-v8a/libffmpeg.so
+          cp ffmpeg-src/ffprobe out/jniLibs/arm64-v8a/libffprobe.so
 
       - name: Upload FFmpeg artifact
         uses: actions/upload-artifact@v4
         with:
           name: ffmpeg-arm64
           path: out/jniLibs/arm64-v8a
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   build-aria2:
     name: Build aria2 (arm64)
@@ -242,6 +244,7 @@ jobs:
     name: Verify alignment and bundle
     runs-on: ubuntu-latest
     needs: [build-ffmpeg, build-aria2, build-python]
+    if: ${{ always() }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

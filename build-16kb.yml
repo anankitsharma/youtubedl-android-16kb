@@ -1,0 +1,129 @@
+name: Build aligned native libs (16KB)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker.io zip unzip dpkg-dev binutils llvm
+
+      - name: Clone Termux packages
+        run: git clone https://github.com/termux/termux-packages.git
+
+      - name: Build FFmpeg (arm64, 16KB)
+        working-directory: termux-packages
+        env:
+          TERMUX_ARCH: aarch64
+        run: |
+          cat > build-ffmpeg.sh << 'EOS'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+          export TERMUX_ARCH=aarch64
+          export TERMUX_PREFIX=/data/youtubedl-android/usr
+          export TERMUX_ANDROID_HOME=/data/youtubedl-android/home
+          export LDFLAGS="$LDFLAGS -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+          ./build-package.sh ffmpeg
+          EOS
+          chmod +x build-ffmpeg.sh
+          ./scripts/run-docker.sh ./clean.sh
+          ./scripts/run-docker.sh ./build-ffmpeg.sh
+
+      - name: Stage FFmpeg outputs
+        run: |
+          mkdir -p out/jniLibs/arm64-v8a
+          cd termux-packages/debs
+          find . -type f -name "*.deb" -print -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/ffmpeg \; || true
+          cd $GITHUB_WORKSPACE/out/ffmpeg
+          if [ -d data/youtubedl-android/usr/lib ]; then
+            (cd data/youtubedl-android && zip --symlinks -r $GITHUB_WORKSPACE/out/libffmpeg.zip usr/lib)
+            cp $GITHUB_WORKSPACE/out/libffmpeg.zip $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libffmpeg.zip.so
+          fi
+          ffprobe_path=$(find data -type f -name ffprobe 2>/dev/null | head -n1 || true)
+          if [ -n "$ffprobe_path" ]; then cp "$ffprobe_path" $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libffprobe.so || true; fi
+          if ls data/youtubedl-android/usr/lib/libavcodec*.so >/dev/null 2>&1; then
+            cp data/youtubedl-android/usr/lib/libavcodec*.so $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libffmpeg.so || true
+          fi
+
+      - name: Build aria2 (arm64, 16KB)
+        working-directory: termux-packages
+        env:
+          TERMUX_ARCH: aarch64
+        run: |
+          cat > build-aria2.sh << 'EOS'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+          export TERMUX_ARCH=aarch64
+          export TERMUX_PREFIX=/data/youtubedl-android/usr
+          export TERMUX_ANDROID_HOME=/data/youtubedl-android/home
+          export LDFLAGS="$LDFLAGS -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+          ./build-package.sh aria2
+          EOS
+          chmod +x build-aria2.sh
+          ./scripts/run-docker.sh ./build-aria2.sh
+
+      - name: Stage aria2 outputs
+        run: |
+          cd termux-packages/debs
+          find . -type f -name "*.deb" -print -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/aria2 \; || true
+          cd $GITHUB_WORKSPACE/out/aria2
+          mkdir -p $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a
+          aria2c_path=$(find data -type f -name aria2c 2>/dev/null | head -n1 || true)
+          if [ -n "$aria2c_path" ]; then cp "$aria2c_path" $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libaria2c.so || true; fi
+          if [ -d data/youtubedl-android/usr/lib ]; then
+            (cd data/youtubedl-android && zip --symlinks -r $GITHUB_WORKSPACE/out/libaria2c.zip usr/lib)
+            cp $GITHUB_WORKSPACE/out/libaria2c.zip $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libaria2c.zip.so
+          fi
+
+      - name: Build Python (arm64, 16KB)
+        working-directory: termux-packages
+        env:
+          TERMUX_ARCH: aarch64
+        run: |
+          cat > build-python.sh << 'EOS'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+          export TERMUX_ARCH=aarch64
+          export TERMUX_PREFIX=/data/youtubedl-android/usr
+          export TERMUX_ANDROID_HOME=/data/youtubedl-android/home
+          export LDFLAGS="$LDFLAGS -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+          ./build-package.sh python
+          EOS
+          chmod +x build-python.sh
+          ./scripts/run-docker.sh ./build-python.sh
+
+      - name: Stage Python outputs
+        run: |
+          cd termux-packages/debs
+          find . -type f -name "*.deb" -print -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/python \; || true
+          cd $GITHUB_WORKSPACE/out/python
+          mkdir -p $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a
+          lp=$(find data/youtubedl-android/usr/lib -maxdepth 1 -type f -name "libpython*.so" | head -n1 || true)
+          if [ -n "$lp" ]; then cp "$lp" $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libpython.so || true; fi
+          if [ -d data/youtubedl-android/usr/lib ]; then
+            (cd data/youtubedl-android && zip --symlinks -r $GITHUB_WORKSPACE/out/libpython.zip usr/lib)
+            cp $GITHUB_WORKSPACE/out/libpython.zip $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libpython.zip.so
+          fi
+
+      - name: Verify 16KB alignment
+        run: |
+          for f in out/jniLibs/arm64-v8a/*.so; do
+            echo "Checking $f"; llvm-readobj --program-headers "$f" | grep -E "(Type: PT_LOAD|Alignment:)" || true
+            if ! llvm-readobj --program-headers "$f" | grep -q "Alignment: 16384"; then
+              echo "Alignment check failed for $f" && exit 1
+            fi
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aligned-jniLibs-arm64-v8a
+          path: out/jniLibs/arm64-v8a

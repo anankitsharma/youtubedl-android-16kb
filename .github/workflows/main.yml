@@ -328,12 +328,34 @@ jobs:
           fi
           echo "Found ${#files[@]} .so files to verify:"
           printf '%s\n' "${files[@]}"
+          
+          # Filter out ZIP files (they have .zip.so extension but are actually ZIP archives)
+          elf_files=()
+          zip_files=()
+          for f in "${files[@]}"; do
+            if file "$f" | grep -q "Zip archive"; then
+              zip_files+=("$f")
+              echo "📦 Skipping ZIP file: $f"
+            else
+              elf_files+=("$f")
+            fi
+          done
+          
+          echo "Found ${#elf_files[@]} ELF files to verify:"
+          printf '%s\n' "${elf_files[@]}"
+          echo "Found ${#zip_files[@]} ZIP files (skipped):"
+          printf '%s\n' "${zip_files[@]}"
+          
+          if [ ${#elf_files[@]} -eq 0 ]; then
+            echo "No ELF files found to verify" && exit 1
+          fi
+          
           fail=0
           
           # Check if llvm-readobj is available
           if command -v llvm-readobj &> /dev/null; then
             echo "Using llvm-readobj for verification"
-            for f in "${files[@]}"; do
+            for f in "${elf_files[@]}"; do
               echo "Checking $f"
               # Print PT_LOAD headers for debugging
               if llvm-readobj --program-headers "$f" 2>/dev/null | grep -E "(Type: PT_LOAD|Alignment:)" || true; then
@@ -358,7 +380,7 @@ jobs:
             done
           else
             echo "⚠️ llvm-readobj not available, using readelf as fallback"
-            for f in "${files[@]}"; do
+            for f in "${elf_files[@]}"; do
               echo "Checking $f with readelf"
               # Use readelf as fallback - check for 16KB alignment in program headers
               if readelf -l "$f" 2>/dev/null | grep -q "LOAD.*0x4000"; then
@@ -373,6 +395,9 @@ jobs:
           
           if [ $fail -eq 0 ]; then
             echo "🎉 All native libraries have 16KB alignment!"
+            if [ ${#zip_files[@]} -gt 0 ]; then
+              echo "📦 Note: ${#zip_files[@]} ZIP files were skipped (they contain libraries but are not ELF binaries)"
+            fi
           else
             echo "💥 Some native libraries failed 16KB alignment check"
           fi

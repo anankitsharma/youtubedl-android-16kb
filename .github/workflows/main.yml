@@ -15,13 +15,22 @@ jobs:
     env:
       API: 21
       EXTRA_LDFLAGS: "-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - uses: actions/checkout@v4
 
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl tar xz-utils pkg-config build-essential git nasm yasm llvm
+          sudo apt-get install -y curl tar xz-utils pkg-config build-essential git nasm yasm llvm ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ffmpeg-ccache-${{ runner.os }}-${{ hashFiles('.github/workflows/main.yml') }}
+          restore-keys: |
+            ffmpeg-ccache-${{ runner.os }}-
 
       - name: Download FFmpeg source (shallow)
         run: |
@@ -37,8 +46,8 @@ jobs:
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export TARGET=aarch64-linux-android
           export API=${API}
-          export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
-          export CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++
+          export CC="ccache $TOOLCHAIN/bin/${TARGET}${API}-clang"
+          export CXX="ccache $TOOLCHAIN/bin/${TARGET}${API}-clang++"
           export AR=$TOOLCHAIN/bin/llvm-ar
           export LD=$TOOLCHAIN/bin/ld.lld
           export STRIP=$TOOLCHAIN/bin/llvm-strip

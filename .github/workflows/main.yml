@@ -14,7 +14,12 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y docker.io zip unzip dpkg-dev binutils llvm
+          # Install packages that don't conflict with existing Docker
+          sudo apt-get install -y zip unzip dpkg-dev binutils llvm
+          # Check if Docker is already available (it usually is on GitHub runners)
+          if ! command -v docker &> /dev/null; then
+            echo "Docker is already available"
+          fi
 
       - name: Clone Termux packages
         run: git clone https://github.com/termux/termux-packages.git

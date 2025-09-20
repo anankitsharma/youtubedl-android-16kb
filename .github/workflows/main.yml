@@ -63,8 +63,6 @@ jobs:
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export TARGET=aarch64-linux-android
           export API=${API}
-          # Use direct clang paths (no spaces) to avoid configure parsing the
-          # compiler path as a separate option
           export CC="$TOOLCHAIN/bin/${TARGET}${API}-clang"
           export CXX="$TOOLCHAIN/bin/${TARGET}${API}-clang++"
           export AR=$TOOLCHAIN/bin/llvm-ar
@@ -81,10 +79,10 @@ jobs:
             --enable-cross-compile \
             --cc="$CC" \
             --cxx="$CXX" \
-            --ar=$AR \
-            --nm=$NM \
-            --ranlib=$RANLIB \
-            --strip=$STRIP \
+            --ar="$AR" \
+            --nm="$NM" \
+            --ranlib="$RANLIB" \
+            --strip="$STRIP" \
             --pkg-config=false \
             --prefix=/data/youtubedl-android/usr \
             --enable-shared \
@@ -285,6 +283,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm binutils
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -303,14 +306,26 @@ jobs:
           if [ ${#files[@]} -eq 0 ]; then
             echo "No .so files found to verify" && exit 1
           fi
+          echo "Found ${#files[@]} .so files to verify:"
+          printf '%s\n' "${files[@]}"
           fail=0
           for f in "${files[@]}"; do
             echo "Checking $f"
+            # Print PT_LOAD headers for debugging
+            llvm-readobj --program-headers "$f" | grep -E "(Type: PT_LOAD|Alignment:)" || true
+            # Require at least one PT_LOAD with Alignment: 16384
             if ! llvm-readobj --program-headers "$f" | awk '/Type: PT_LOAD/{flag=1} flag && /Alignment:/{print $2; flag=0}' | grep -q 16384; then
-              echo "Alignment check failed for $f"; fail=1
-              llvm-readobj --program-headers "$f" | grep -E '(Type: PT_LOAD|Alignment:)' || true
+              echo "❌ Alignment check failed for $f - no PT_LOAD segment with 16384 alignment found"
+              fail=1
+            else
+              echo "✅ Alignment check passed for $f"
             fi
           done
+          if [ $fail -eq 0 ]; then
+            echo "🎉 All native libraries have 16KB alignment!"
+          else
+            echo "💥 Some native libraries failed 16KB alignment check"
+          fi
           exit $fail
 
       - name: Upload bundled artifacts

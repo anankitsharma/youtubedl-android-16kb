@@ -3,15 +3,16 @@ name: Build aligned native libs (16KB)
 on:
   workflow_dispatch:
 
+# Allow multiple runs; we prefer reliability over cancellation
 concurrency:
   group: 16kb-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build-ffmpeg:
     name: Build FFmpeg (arm64, direct NDK)
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
     env:
       API: 21
       EXTRA_LDFLAGS: "-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
@@ -23,6 +24,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y curl tar xz-utils pkg-config build-essential git nasm yasm llvm ccache
+
+      - name: Set up Java (for sdkmanager)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK r27
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "ndk;27.0.12077973" "platform-tools" "platforms;android-34" || true
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -42,7 +59,7 @@ jobs:
         env:
           ANDROID_NDK: ${{ env.ANDROID_NDK }}
         run: |
-          export NDK=${ANDROID_NDK:-$ANDROID_NDK_LATEST_HOME}
+          export NDK=${ANDROID_NDK:-$ANDROID_NDK_ROOT}
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export TARGET=aarch64-linux-android
           export API=${API}
@@ -67,6 +84,7 @@ jobs:
             --ranlib=$RANLIB \
             --strip=$STRIP \
             --pkg-config=false \
+            --prefix=/data/youtubedl-android/usr \
             --enable-shared \
             --disable-static \
             --disable-doc \
@@ -95,12 +113,19 @@ jobs:
         working-directory: ffmpeg-src
         run: |
           make -j$(nproc)
+          make install DESTDIR=$GITHUB_WORKSPACE/out/ffmpeg-install || true
 
       - name: Stage outputs
         run: |
           mkdir -p out/jniLibs/arm64-v8a
-          cp ffmpeg-src/ffmpeg out/jniLibs/arm64-v8a/libffmpeg.so
-          cp ffmpeg-src/ffprobe out/jniLibs/arm64-v8a/libffprobe.so
+          # Package installed libs similar to Termux structure for yt-dlp wrapper
+          if [ -d out/ffmpeg-install/data/youtubedl-android/usr ]; then
+            (cd out/ffmpeg-install && zip --symlinks -r $GITHUB_WORKSPACE/out/libffmpeg.zip data/youtubedl-android/usr)
+            cp $GITHUB_WORKSPACE/out/libffmpeg.zip out/jniLibs/arm64-v8a/libffmpeg.zip.so
+          fi
+          # Ship executables as .so (matches existing packaging convention)
+          if [ -f ffmpeg-src/ffmpeg ]; then cp ffmpeg-src/ffmpeg out/jniLibs/arm64-v8a/libffmpeg.so; fi
+          if [ -f ffmpeg-src/ffprobe ]; then cp ffmpeg-src/ffprobe out/jniLibs/arm64-v8a/libffprobe.so; fi
 
       - name: Upload FFmpeg artifact
         uses: actions/upload-artifact@v4

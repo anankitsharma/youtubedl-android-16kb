@@ -286,7 +286,11 @@ jobs:
       - name: Install verification tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm binutils
+          sudo apt-get install -y llvm-14 binutils
+          # Create symlinks for llvm-readobj if needed
+          if ! command -v llvm-readobj &> /dev/null; then
+            sudo ln -sf /usr/bin/llvm-readobj-14 /usr/bin/llvm-readobj || true
+          fi
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -309,18 +313,37 @@ jobs:
           echo "Found ${#files[@]} .so files to verify:"
           printf '%s\n' "${files[@]}"
           fail=0
-          for f in "${files[@]}"; do
-            echo "Checking $f"
-            # Print PT_LOAD headers for debugging
-            llvm-readobj --program-headers "$f" | grep -E "(Type: PT_LOAD|Alignment:)" || true
-            # Require at least one PT_LOAD with Alignment: 16384
-            if ! llvm-readobj --program-headers "$f" | awk '/Type: PT_LOAD/{flag=1} flag && /Alignment:/{print $2; flag=0}' | grep -q 16384; then
-              echo "❌ Alignment check failed for $f - no PT_LOAD segment with 16384 alignment found"
-              fail=1
-            else
-              echo "✅ Alignment check passed for $f"
-            fi
-          done
+          
+          # Check if llvm-readobj is available
+          if command -v llvm-readobj &> /dev/null; then
+            echo "Using llvm-readobj for verification"
+            for f in "${files[@]}"; do
+              echo "Checking $f"
+              # Print PT_LOAD headers for debugging
+              llvm-readobj --program-headers "$f" | grep -E "(Type: PT_LOAD|Alignment:)" || true
+              # Require at least one PT_LOAD with Alignment: 16384
+              if ! llvm-readobj --program-headers "$f" | awk '/Type: PT_LOAD/{flag=1} flag && /Alignment:/{print $2; flag=0}' | grep -q 16384; then
+                echo "❌ Alignment check failed for $f - no PT_LOAD segment with 16384 alignment found"
+                fail=1
+              else
+                echo "✅ Alignment check passed for $f"
+              fi
+            done
+          else
+            echo "⚠️ llvm-readobj not available, using readelf as fallback"
+            for f in "${files[@]}"; do
+              echo "Checking $f with readelf"
+              # Use readelf as fallback - check for 16KB alignment in program headers
+              if readelf -l "$f" | grep -q "LOAD.*0x4000"; then
+                echo "✅ Alignment check passed for $f (16KB alignment detected)"
+              else
+                echo "❌ Alignment check failed for $f - no 16KB alignment found"
+                readelf -l "$f" | grep "LOAD" || true
+                fail=1
+              fi
+            done
+          fi
+          
           if [ $fail -eq 0 ]; then
             echo "🎉 All native libraries have 16KB alignment!"
           else

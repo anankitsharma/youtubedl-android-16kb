@@ -25,6 +25,11 @@ on:
         description: "Optional run id to reuse deb artifacts from"
         required: false
         type: string
+      cache_key:
+        description: "Cache key suffix to reuse builds across runs (bump to bust)"
+        required: false
+        default: 'v1'
+        type: string
 
 # Allow multiple runs; we prefer reliability over cancellation
 concurrency:
@@ -172,24 +177,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Restore aria2 debs cache
+        id: aria2_deb_cache
+        uses: actions/cache@v4
+        with:
+          path: out/debs-aria2
+          key: aria2-debs-${{ runner.os }}-${{ inputs.cache_key }}
+          restore-keys: |
+            aria2-debs-${{ runner.os }}-
+
       - name: Install deps
         run: |
           sudo apt-get update
           sudo apt-get install -y zip unzip dpkg-dev binutils llvm
           docker --version || true
 
-      - name: Restore caches
+      - name: Restore termux build caches
         uses: actions/cache@v4
         with:
           path: |
             termux-packages/.termux-build
             termux-packages/debs
             termux-packages/.cache
-          key: aria2-${{ runner.os }}-${{ hashFiles('.github/workflows/main.yml') }}
+          key: aria2-termux-${{ runner.os }}-${{ inputs.cache_key }}
           restore-keys: |
-            aria2-${{ runner.os }}-
+            aria2-termux-${{ runner.os }}-
 
       - name: Clone Termux packages (shallow)
+        if: steps.aria2_deb_cache.outputs.cache-hit != 'true'
         run: |
           if [ ! -d termux-packages ]; then
             git clone --depth 1 https://github.com/termux/termux-packages.git
@@ -197,6 +212,7 @@ jobs:
 
       - name: Build aria2
         working-directory: termux-packages
+        if: steps.aria2_deb_cache.outputs.cache-hit != 'true'
         run: |
           cat > build-aria2.sh << 'EOS'
           #!/usr/bin/env bash
@@ -212,15 +228,28 @@ jobs:
           ./build-aria2.sh
 
       - name: List built aria2 debs
+        if: steps.aria2_deb_cache.outputs.cache-hit != 'true'
         run: |
           echo "Listing debs after aria2 build:"
-          ls -la termux-packages/debs || true
+          find termux-packages -type f -name "*.deb" -print || true
+
+      - name: Collect aria2 debs
+        if: steps.aria2_deb_cache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          mkdir -p out/debs-aria2
+          # Copy any .deb produced anywhere inside termux-packages
+          found=$(find termux-packages -type f -name "*.deb" -print -exec cp {} out/debs-aria2/ \; | tee /dev/stderr | wc -l)
+          if [ "$found" -eq 0 ]; then
+            echo "No aria2 debs produced" >&2
+            exit 1
+          fi
 
       - name: Upload aria2 deb artifacts
         uses: actions/upload-artifact@v4
         with:
           name: aria2-debs
-          path: termux-packages/debs
+          path: out/debs-aria2
           if-no-files-found: error
 
   build-python:
@@ -237,24 +266,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Restore python debs cache
+        id: python_deb_cache
+        uses: actions/cache@v4
+        with:
+          path: out/debs-python
+          key: python-debs-${{ runner.os }}-${{ inputs.cache_key }}
+          restore-keys: |
+            python-debs-${{ runner.os }}-
+
       - name: Install deps
         run: |
           sudo apt-get update
           sudo apt-get install -y zip unzip dpkg-dev binutils llvm
           docker --version || true
 
-      - name: Restore caches
+      - name: Restore termux build caches
         uses: actions/cache@v4
         with:
           path: |
             termux-packages/.termux-build
             termux-packages/debs
             termux-packages/.cache
-          key: python-${{ runner.os }}-${{ hashFiles('.github/workflows/main.yml') }}
+          key: python-termux-${{ runner.os }}-${{ inputs.cache_key }}
           restore-keys: |
-            python-${{ runner.os }}-
+            python-termux-${{ runner.os }}-
 
       - name: Clone Termux packages (shallow)
+        if: steps.python_deb_cache.outputs.cache-hit != 'true'
         run: |
           if [ ! -d termux-packages ]; then
             git clone --depth 1 https://github.com/termux/termux-packages.git
@@ -262,6 +301,7 @@ jobs:
 
       - name: Build Python
         working-directory: termux-packages
+        if: steps.python_deb_cache.outputs.cache-hit != 'true'
         run: |
           cat > build-python.sh << 'EOS'
           #!/usr/bin/env bash
@@ -277,15 +317,27 @@ jobs:
           ./build-python.sh
 
       - name: List built Python debs
+        if: steps.python_deb_cache.outputs.cache-hit != 'true'
         run: |
           echo "Listing debs after Python build:"
-          ls -la termux-packages/debs || true
+          find termux-packages -type f -name "*.deb" -print || true
+
+      - name: Collect Python debs
+        if: steps.python_deb_cache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          mkdir -p out/debs-python
+          found=$(find termux-packages -type f -name "*.deb" -print -exec cp {} out/debs-python/ \; | tee /dev/stderr | wc -l)
+          if [ "$found" -eq 0 ]; then
+            echo "No python debs produced" >&2
+            exit 1
+          fi
 
       - name: Upload Python deb artifacts
         uses: actions/upload-artifact@v4
         with:
           name: python-debs
-          path: termux-packages/debs
+          path: out/debs-python
           if-no-files-found: error
 
   stage-aria2-zip:

@@ -254,12 +254,21 @@ jobs:
       - name: Verify 16KB PT_LOAD alignment
         run: |
           set -euo pipefail
-          for f in out/jniLibs/arm64-v8a/*.so; do
+          shopt -s nullglob
+          real_sos=(out/jniLibs/arm64-v8a/*.so)
+          status=0
+          for f in "${real_sos[@]}"; do
+            # Skip payload ZIPs named *.zip.so
+            if [[ "$f" == *.zip.so ]]; then
+              continue
+            fi
             echo "Checking $f"
             if ! llvm-readobj --program-headers "$f" | grep -A3 "Type: PT_LOAD" | grep -q "Alignment: 16384"; then
-              echo "::error::$f missing PT_LOAD Alignment: 16384"; exit 1
+              echo "::error::$f missing PT_LOAD Alignment: 16384"
+              status=1
             fi
           done
+          exit $status
 
       - name: Upload jniLibs artifact
         uses: actions/upload-artifact@v4

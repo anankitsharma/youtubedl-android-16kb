@@ -1,0 +1,120 @@
+name: Stage drop-in jniLibs (16KB)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reuse_run_id:
+        description: "Run ID to reuse artifacts from (same repo)"
+        required: true
+        type: string
+      aria2_artifact:
+        description: "Name of staged aria2 ZIP artifact"
+        required: false
+        default: "aria2-arm64"
+        type: string
+      python_artifact:
+        description: "Name of staged Python ZIP artifact"
+        required: false
+        default: "python-arm64"
+        type: string
+      aria2_debs_artifact:
+        description: "Name of aria2 debs artifact"
+        required: false
+        default: "aria2-debs"
+        type: string
+      python_debs_artifact:
+        description: "Name of Python debs artifact"
+        required: false
+        default: "python-debs"
+        type: string
+
+jobs:
+  stage-jniLibs:
+    name: Assemble ready-to-drop jniLibs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev llvm zip unzip
+
+      - name: Download staged aria2 ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.aria2_artifact }}
+          path: _aria2_zip
+          run-id: ${{ inputs.reuse_run_id }}
+
+      - name: Download staged Python ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.python_artifact }}
+          path: _python_zip
+          run-id: ${{ inputs.reuse_run_id }}
+
+      - name: Download aria2 debs
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.aria2_debs_artifact }}
+          path: _aria2_debs
+          run-id: ${{ inputs.reuse_run_id }}
+
+      - name: Download Python debs
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.python_debs_artifact }}
+          path: _python_debs
+          run-id: ${{ inputs.reuse_run_id }}
+
+      - name: Extract debs and assemble jniLibs
+        run: |
+          set -euxo pipefail
+          mkdir -p out/jniLibs/arm64-v8a out/tmp/aria2 out/tmp/python
+
+          # Stage .zip.so payloads
+          test -f _aria2_zip/libaria2c.zip
+          test -f _python_zip/libpython.zip
+          cp _aria2_zip/libaria2c.zip out/jniLibs/arm64-v8a/libaria2c.zip.so
+          cp _python_zip/libpython.zip out/jniLibs/arm64-v8a/libpython.zip.so
+
+          # Extract debs into temporary roots
+          shopt -s nullglob
+          for f in _aria2_debs/*.deb; do dpkg-deb -x "$f" out/tmp/aria2; done
+          for f in _python_debs/*.deb; do dpkg-deb -x "$f" out/tmp/python; done
+
+          # Find aria2c executable and rename to libaria2c.so
+          aria2c_path=$(find out/tmp/aria2 -type f -name aria2c | head -n1 || true)
+          if [ -z "$aria2c_path" ]; then
+            echo "::error::aria2c not found in aria2 debs"; exit 1
+          fi
+          cp "$aria2c_path" out/jniLibs/arm64-v8a/libaria2c.so
+
+          # Find versioned libpythonX.Y.so and rename to libpython.so
+          pyso_path=$(find out/tmp/python -type f -path "*/usr/lib/*" -name "libpython*.so" | head -n1 || true)
+          if [ -z "$pyso_path" ]; then
+            echo "::error::libpython*.so not found in python debs"; exit 1
+          fi
+          cp "$pyso_path" out/jniLibs/arm64-v8a/libpython.so
+
+      - name: Verify 16KB PT_LOAD alignment
+        run: |
+          set -euo pipefail
+          for f in out/jniLibs/arm64-v8a/*.so; do
+            echo "Checking $f"
+            if ! llvm-readobj --program-headers "$f" | grep -A3 "Type: PT_LOAD" | grep -q "Alignment: 16384"; then
+              echo "::error::$f missing PT_LOAD Alignment: 16384"; exit 1
+            fi
+          done
+
+      - name: Upload jniLibs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jniLibs-arm64
+          path: out/jniLibs/arm64-v8a
+          if-no-files-found: error
+          retention-days: 14
+
+

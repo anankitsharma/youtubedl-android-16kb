@@ -93,6 +93,43 @@ jobs:
             gh run download ${{ inputs.reuse_run_id }} -n ${{ inputs.aria2_artifact }} -D _aria2_zip || true
           fi
 
+      - name: Fallback download ALL artifacts (any name)
+        if: ${{ always() }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: "*"
+          path: _all_artifacts
+          merge-multiple: true
+          run-id: ${{ inputs.reuse_run_id }}
+
+      - name: Consolidate debs from any downloaded artifacts
+        if: ${{ always() }}
+        run: |
+          set -euxo pipefail
+          mkdir -p _aria2_debs _python_debs
+          if [ -d _all_artifacts ]; then
+            # Copy potential debs into expected folders based on filename hints
+            while IFS= read -r -d '' f; do
+              base=$(basename "$f")
+              if echo "$base" | grep -qi aria2; then
+                cp -n "$f" _aria2_debs/ || true
+              fi
+              if echo "$base" | grep -qi python; then
+                cp -n "$f" _python_debs/ || true
+              fi
+            done < <(find _all_artifacts -type f -name "*.deb" -print0)
+            # Also bring over staged zips if present
+            if [ ! -f _aria2_zip/libaria2c.zip ]; then
+              azip=$(find _all_artifacts -type f -name libaria2c.zip -print -quit || true)
+              if [ -n "$azip" ]; then mkdir -p _aria2_zip && cp "$azip" _aria2_zip/libaria2c.zip; fi
+            fi
+            if [ ! -f _python_zip/libpython.zip ]; then
+              pzip=$(find _all_artifacts -type f -name libpython.zip -print -quit || true)
+              if [ -n "$pzip" ]; then mkdir -p _python_zip && cp "$pzip" _python_zip/libpython.zip; fi
+            fi
+          fi
+
       - name: Download Python debs
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -167,16 +204,33 @@ jobs:
           # Find aria2c executable and rename to libaria2c.so
           aria2c_path=$(find out/tmp/aria2 -type f -name aria2c | head -n1 || true)
           if [ -z "$aria2c_path" ]; then
-            echo "::error::aria2c not found in aria2 debs"; exit 1
+            # Try from repo outputfiles if available
+            repo_a2_so=$(find "$GITHUB_WORKSPACE/outputfiles" -type f -name libaria2c.so -print -quit || true)
+            repo_a2_bin=$(find "$GITHUB_WORKSPACE/outputfiles" -type f -name aria2c -print -quit || true)
+            if [ -n "$repo_a2_so" ]; then
+              cp "$repo_a2_so" out/jniLibs/arm64-v8a/libaria2c.so
+            elif [ -n "$repo_a2_bin" ]; then
+              cp "$repo_a2_bin" out/jniLibs/arm64-v8a/libaria2c.so
+            else
+              echo "::error::aria2c not found in debs or repo outputfiles"; exit 1
+            fi
+          else
+            cp "$aria2c_path" out/jniLibs/arm64-v8a/libaria2c.so
           fi
-          cp "$aria2c_path" out/jniLibs/arm64-v8a/libaria2c.so
 
           # Find versioned libpythonX.Y.so and rename to libpython.so
           pyso_path=$(find out/tmp/python -type f -path "*/usr/lib/*" -name "libpython*.so" | head -n1 || true)
           if [ -z "$pyso_path" ]; then
-            echo "::error::libpython*.so not found in python debs"; exit 1
+            # Try from repo outputfiles if available
+            repo_py_so=$(find "$GITHUB_WORKSPACE/outputfiles" -type f -name "libpython*.so" -print -quit || true)
+            if [ -n "$repo_py_so" ]; then
+              cp "$repo_py_so" out/jniLibs/arm64-v8a/libpython.so
+            else
+              echo "::error::libpython*.so not found in python debs or repo outputfiles"; exit 1
+            fi
+          else
+            cp "$pyso_path" out/jniLibs/arm64-v8a/libpython.so
           fi
-          cp "$pyso_path" out/jniLibs/arm64-v8a/libpython.so
 
       - name: Verify 16KB PT_LOAD alignment
         run: |

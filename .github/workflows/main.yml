@@ -285,6 +285,4 @@ jobs:
           path: out/libpython.zip
           if-no-files-found: error
 
-  verify-and-bundle:
-    if: false
-    runs-on: ubuntu-latest
+  # verify-and-bundle job removed intentionally; we only upload ZIPs from build jobs

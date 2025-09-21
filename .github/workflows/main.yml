@@ -245,6 +245,19 @@ jobs:
             exit 1
           fi
 
+      - name: Sanitize aria2 deb filenames (replace ':' with '_')
+        run: |
+          set -euxo pipefail
+          mkdir -p out/debs-aria2
+          shopt -s nullglob
+          for f in out/debs-aria2/*.deb; do
+            base=$(basename "$f")
+            safe=${base//:/_}
+            if [ "$base" != "$safe" ]; then
+              mv -f "out/debs-aria2/$base" "out/debs-aria2/$safe"
+            fi
+          done
+
       - name: Upload aria2 deb artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -332,6 +345,19 @@ jobs:
             echo "No python debs produced" >&2
             exit 1
           fi
+
+      - name: Sanitize Python deb filenames (replace ':' with '_')
+        run: |
+          set -euxo pipefail
+          mkdir -p out/debs-python
+          shopt -s nullglob
+          for f in out/debs-python/*.deb; do
+            base=$(basename "$f")
+            safe=${base//:/_}
+            if [ "$base" != "$safe" ]; then
+              mv -f "out/debs-python/$base" "out/debs-python/$safe"
+            fi
+          done
 
       - name: Upload Python deb artifacts
         uses: actions/upload-artifact@v4

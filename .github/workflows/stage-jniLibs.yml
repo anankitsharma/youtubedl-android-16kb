@@ -43,6 +43,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y dpkg-dev llvm zip unzip
+          gh --version || true
 
       - name: Download staged aria2 ZIP
         uses: actions/download-artifact@v4
@@ -62,17 +63,65 @@ jobs:
 
       - name: Download aria2 debs
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ inputs.aria2_debs_artifact }}
           path: _aria2_debs
           run-id: ${{ inputs.reuse_run_id }}
 
+      - name: Fallback download aria2 debs by pattern
+        if: ${{ always() }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: aria2-*
+          path: _aria2_debs
+          merge-multiple: true
+          run-id: ${{ inputs.reuse_run_id }}
+
+      - name: Fallback download artifacts via gh (aria2)
+        if: ${{ always() }}
+        run: |
+          set -euxo pipefail
+          mkdir -p _aria2_debs _aria2_zip
+          # If no debs present yet, try gh run download
+          if [ -z "$(ls -1 _aria2_debs 2>/dev/null || true)" ]; then
+            gh run download ${{ inputs.reuse_run_id }} -n ${{ inputs.aria2_debs_artifact }} -D _aria2_debs || true
+          fi
+          # Try staged zip as well
+          if [ ! -f _aria2_zip/libaria2c.zip ]; then
+            gh run download ${{ inputs.reuse_run_id }} -n ${{ inputs.aria2_artifact }} -D _aria2_zip || true
+          fi
+
       - name: Download Python debs
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ inputs.python_debs_artifact }}
           path: _python_debs
           run-id: ${{ inputs.reuse_run_id }}
+
+      - name: Fallback download Python debs by pattern
+        if: ${{ always() }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: python-*
+          path: _python_debs
+          merge-multiple: true
+          run-id: ${{ inputs.reuse_run_id }}
+
+      - name: Fallback download artifacts via gh (python)
+        if: ${{ always() }}
+        run: |
+          set -euxo pipefail
+          mkdir -p _python_debs _python_zip
+          if [ -z "$(ls -1 _python_debs 2>/dev/null || true)" ]; then
+            gh run download ${{ inputs.reuse_run_id }} -n ${{ inputs.python_debs_artifact }} -D _python_debs || true
+          fi
+          if [ ! -f _python_zip/libpython.zip ]; then
+            gh run download ${{ inputs.reuse_run_id }} -n ${{ inputs.python_artifact }} -D _python_zip || true
+          fi
 
       - name: Extract debs and assemble jniLibs
         run: |
@@ -81,8 +130,8 @@ jobs:
 
           # Extract debs into temporary roots
           shopt -s nullglob
-          for f in _aria2_debs/*.deb; do dpkg-deb -x "$f" out/tmp/aria2; done
-          for f in _python_debs/*.deb; do dpkg-deb -x "$f" out/tmp/python; done
+          for f in _aria2_debs/*.deb; do dpkg-deb -x "$f" out/tmp/aria2 || true; done
+          for f in _python_debs/*.deb; do dpkg-deb -x "$f" out/tmp/python || true; done
 
           # Determine prefixes for aria2 and python
           aria2_prefix=""

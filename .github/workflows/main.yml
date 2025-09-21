@@ -224,10 +224,8 @@ jobs:
           set -euxo pipefail
           pkg=termux-packages/packages/aria2/build.sh
           if [ -f "$pkg" ]; then
-            # Enforce lld and 16KB page alignment for ALL link steps
-            echo 'TERMUX_PKG_EXTRA_LDFLAGS+=" -fuse-ld=lld -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 "' | tee -a "$pkg"
-            echo 'TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" LDFLAGS=\"${TERMUX_PKG_EXTRA_LDFLAGS}\" "' | tee -a "$pkg"
-            echo 'TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" -DCMAKE_EXE_LINKER_FLAGS=\"-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384\" -DCMAKE_SHARED_LINKER_FLAGS=\"-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384\" "' | tee -a "$pkg"
+            # Enforce 16KB page alignment for ALL link steps via Termux EXTRA_LDFLAGS
+            echo 'TERMUX_PKG_EXTRA_LDFLAGS+=" -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 "' | tee -a "$pkg"
           fi
 
       - name: Build aria2
@@ -241,7 +239,7 @@ jobs:
           export TERMUX_PREFIX=${TERMUX_PREFIX}
           export TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME}
           export MAKEFLAGS=${MAKEFLAGS}
-          export EXTRA_LDFLAGS="-fuse-ld=lld -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+          export EXTRA_LDFLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
           export LDFLAGS="${EXTRA_LDFLAGS} ${LDFLAGS:-} ${EXTRA_LDFLAGS}"
           export CFLAGS="${CFLAGS:-} -fPIC"
           export CXXFLAGS="${CXXFLAGS:-} -fPIC"
@@ -344,9 +342,7 @@ jobs:
           set -euxo pipefail
           pkg=termux-packages/packages/python/build.sh
           if [ -f "$pkg" ]; then
-            echo 'TERMUX_PKG_EXTRA_LDFLAGS+=" -fuse-ld=lld -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 "' | tee -a "$pkg"
-            echo 'TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" LDFLAGS=\"${TERMUX_PKG_EXTRA_LDFLAGS}\" "' | tee -a "$pkg"
-            echo 'TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" -DCMAKE_EXE_LINKER_FLAGS=\"-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384\" -DCMAKE_SHARED_LINKER_FLAGS=\"-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384\" "' | tee -a "$pkg"
+            echo 'TERMUX_PKG_EXTRA_LDFLAGS+=" -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 "' | tee -a "$pkg"
           fi
 
       - name: Build Python
@@ -360,7 +356,7 @@ jobs:
           export TERMUX_PREFIX=${TERMUX_PREFIX}
           export TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME}
           export MAKEFLAGS=${MAKEFLAGS}
-          export EXTRA_LDFLAGS="-fuse-ld=lld -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+          export EXTRA_LDFLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
           export LDFLAGS="${EXTRA_LDFLAGS} ${LDFLAGS:-} ${EXTRA_LDFLAGS}"
           export CFLAGS="${CFLAGS:-} -fPIC"
           export CXXFLAGS="${CXXFLAGS:-} -fPIC"

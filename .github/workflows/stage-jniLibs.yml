@@ -94,15 +94,21 @@ jobs:
             if [ -d "$p/lib" ]; then python_prefix="$p"; break; fi
           done
 
-          # Stage .zip.so payloads, build from debs if staged zips missing
-          if [ -f _aria2_zip/libaria2c.zip ]; then
+          # Stage .zip.so payloads, prefer repo outputfiles/, then staged zips, else build from debs
+          aria2_zip_repo=$(find "$GITHUB_WORKSPACE/outputfiles" -type f -name libaria2c.zip -print -quit || true)
+          if [ -n "$aria2_zip_repo" ]; then
+            cp "$aria2_zip_repo" out/jniLibs/arm64-v8a/libaria2c.zip.so
+          elif [ -f _aria2_zip/libaria2c.zip ]; then
             cp _aria2_zip/libaria2c.zip out/jniLibs/arm64-v8a/libaria2c.zip.so
           else
             if [ -z "$aria2_prefix" ]; then echo "::error::Could not find aria2 prefix to build zip"; exit 1; fi
             (cd "$(dirname "$aria2_prefix")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libaria2c.zip.so" "$(basename "$aria2_prefix")"/lib)
           fi
 
-          if [ -f _python_zip/libpython.zip ]; then
+          python_zip_repo=$(find "$GITHUB_WORKSPACE/outputfiles" -type f -name libpython.zip -print -quit || true)
+          if [ -n "$python_zip_repo" ]; then
+            cp "$python_zip_repo" out/jniLibs/arm64-v8a/libpython.zip.so
+          elif [ -f _python_zip/libpython.zip ]; then
             cp _python_zip/libpython.zip out/jniLibs/arm64-v8a/libpython.zip.so
           else
             if [ -z "$python_prefix" ]; then echo "::error::Could not find python prefix to build zip"; exit 1; fi

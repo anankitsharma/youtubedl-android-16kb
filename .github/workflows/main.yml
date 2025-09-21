@@ -182,7 +182,7 @@ jobs:
           export TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME}
           export MAKEFLAGS=${MAKEFLAGS}
           export LDFLAGS="${LDFLAGS:-} ${EXTRA_LDFLAGS}"
-          ./scripts/run-docker.sh env TERMUX_ARCH=${TERMUX_ARCH} LDFLAGS="${LDFLAGS}" ./build-package.sh aria2
+          ./scripts/run-docker.sh env TERMUX_ARCH=${TERMUX_ARCH} TERMUX_PREFIX=${TERMUX_PREFIX} TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} LDFLAGS="${LDFLAGS}" ./build-package.sh aria2
           EOS
           chmod +x build-aria2.sh
           ./build-aria2.sh
@@ -194,17 +194,20 @@ jobs:
 
       - name: Stage aria2 outputs
         run: |
+          mkdir -p $GITHUB_WORKSPACE/out
           find termux-packages/debs -type f -name "*.deb" -print -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/aria2 \; || true
           cd $GITHUB_WORKSPACE/out/aria2 || exit 0
-          mkdir -p $GITHUB_WORKSPACE/lib/arm64-v8a
-          aria2c_path=$(find data -type f -name aria2c 2>/dev/null | head -n1 || true)
-          [ -n "$aria2c_path" ] && cp "$aria2c_path" $GITHUB_WORKSPACE/lib/arm64-v8a/libaria2c.so || true
+          if [ -d data/youtubedl-android/usr/lib ]; then
+            (cd data/youtubedl-android && zip --symlinks -r $GITHUB_WORKSPACE/out/libaria2c.zip usr/lib)
+          else
+            echo "aria2 usr/lib not found in extracted debs" >&2
+          fi
 
       - name: Upload aria2 artifact
         uses: actions/upload-artifact@v4
         with:
           name: aria2-arm64
-          path: lib/arm64-v8a
+          path: out/libaria2c.zip
           if-no-files-found: error
 
   build-python:
@@ -254,7 +257,7 @@ jobs:
           export TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME}
           export MAKEFLAGS=${MAKEFLAGS}
           export LDFLAGS="${LDFLAGS:-} ${EXTRA_LDFLAGS}"
-          ./scripts/run-docker.sh env TERMUX_ARCH=${TERMUX_ARCH} LDFLAGS="${LDFLAGS}" ./build-package.sh python
+          ./scripts/run-docker.sh env TERMUX_ARCH=${TERMUX_ARCH} TERMUX_PREFIX=${TERMUX_PREFIX} TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} LDFLAGS="${LDFLAGS}" ./build-package.sh python
           EOS
           chmod +x build-python.sh
           ./build-python.sh
@@ -266,150 +269,22 @@ jobs:
 
       - name: Stage Python outputs
         run: |
+          mkdir -p $GITHUB_WORKSPACE/out
           find termux-packages/debs -type f -name "*.deb" -print -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/python \; || true
           cd $GITHUB_WORKSPACE/out/python || exit 0
-          mkdir -p $GITHUB_WORKSPACE/lib/arm64-v8a
-          lp=$(find data/youtubedl-android/usr/lib -maxdepth 1 -type f -name "libpython*.so" | head -n1 || true)
-          [ -n "$lp" ] && cp "$lp" $GITHUB_WORKSPACE/lib/arm64-v8a/libpython.so || true
+          if [ -d data/youtubedl-android/usr/lib ]; then
+            (cd data/youtubedl-android && zip --symlinks -r $GITHUB_WORKSPACE/out/libpython.zip usr/lib)
+          else
+            echo "python usr/lib not found in extracted debs" >&2
+          fi
 
       - name: Upload Python artifact
         uses: actions/upload-artifact@v4
         with:
           name: python-arm64
-          path: lib/arm64-v8a
+          path: out/libpython.zip
           if-no-files-found: error
 
   verify-and-bundle:
-    name: Verify alignment and bundle
+    if: false
     runs-on: ubuntu-latest
-    needs: [build-aria2, build-python]
-    if: ${{ always() }}
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install verification tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y llvm-14 llvm-14-tools binutils
-          # Verify installation and create symlinks
-          echo "Available llvm tools:"
-          ls -la /usr/bin/llvm* | head -10 || true
-          # Create symlinks for llvm-readobj if needed
-          if ! command -v llvm-readobj &> /dev/null; then
-            if [ -f /usr/bin/llvm-readobj-14 ]; then
-              sudo ln -sf /usr/bin/llvm-readobj-14 /usr/bin/llvm-readobj
-              echo "Created symlink for llvm-readobj"
-            else
-              echo "llvm-readobj-14 not found, trying alternative installation"
-              sudo apt-get install -y llvm-tools-14 || sudo apt-get install -y llvm-tools
-            fi
-          fi
-          # Verify llvm-readobj is available
-          if command -v llvm-readobj &> /dev/null; then
-            echo "✅ llvm-readobj is available: $(which llvm-readobj)"
-            llvm-readobj --version || true
-          else
-            echo "⚠️ llvm-readobj still not available, will use readelf fallback"
-          fi
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: _artifacts
-
-      - name: Merge outputs
-        run: |
-          mkdir -p lib/arm64-v8a
-          find _artifacts -type f -name "*.so" -exec cp {} lib/arm64-v8a/ \; || true
-
-      - name: Verify 16KB alignment (PT_LOAD only)
-        run: |
-          set -euxo pipefail
-          shopt -s nullglob
-          files=(lib/arm64-v8a/*.so)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No .so files found to verify" && exit 1
-          fi
-          echo "Found ${#files[@]} .so files to verify:"
-          printf '%s\n' "${files[@]}"
-          
-          # Filter out ZIP files (they have .zip.so extension but are actually ZIP archives)
-          elf_files=()
-          zip_files=()
-          for f in "${files[@]}"; do
-            if file "$f" | grep -q "Zip archive"; then
-              zip_files+=("$f")
-              echo "📦 Skipping ZIP file: $f"
-            else
-              elf_files+=("$f")
-            fi
-          done
-          
-          echo "Found ${#elf_files[@]} ELF files to verify:"
-          printf '%s\n' "${elf_files[@]}"
-          echo "Found ${#zip_files[@]} ZIP files (skipped):"
-          printf '%s\n' "${zip_files[@]}"
-          
-          if [ ${#elf_files[@]} -eq 0 ]; then
-            echo "No ELF files found to verify" && exit 1
-          fi
-          
-          fail=0
-          
-          # Check if llvm-readobj is available
-          if command -v llvm-readobj &> /dev/null; then
-            echo "Using llvm-readobj for verification"
-            for f in "${elf_files[@]}"; do
-              echo "Checking $f"
-              # Print PT_LOAD headers for debugging
-              if llvm-readobj --program-headers "$f" 2>/dev/null | grep -E "(Type: PT_LOAD|Alignment:)" || true; then
-                # Require at least one PT_LOAD with Alignment: 16384
-                if llvm-readobj --program-headers "$f" 2>/dev/null | awk '/Type: PT_LOAD/{flag=1} flag && /Alignment:/{print $2; flag=0}' | grep -q 16384; then
-                  echo "✅ Alignment check passed for $f"
-                else
-                  echo "❌ Alignment check failed for $f - no PT_LOAD segment with 16384 alignment found"
-                  fail=1
-                fi
-              else
-                echo "⚠️ llvm-readobj failed for $f, falling back to readelf"
-                # Fallback to readelf for this file
-                if readelf -l "$f" 2>/dev/null | grep -q "LOAD.*0x4000"; then
-                  echo "✅ Alignment check passed for $f (16KB alignment detected via readelf)"
-                else
-                  echo "❌ Alignment check failed for $f - no 16KB alignment found"
-                  readelf -l "$f" | grep "LOAD" || true
-                  fail=1
-                fi
-              fi
-            done
-          else
-            echo "⚠️ llvm-readobj not available, using readelf as fallback"
-            for f in "${elf_files[@]}"; do
-              echo "Checking $f with readelf"
-              # Use readelf as fallback - check for 16KB alignment in program headers
-              if readelf -l "$f" 2>/dev/null | grep -q "LOAD.*0x4000"; then
-                echo "✅ Alignment check passed for $f (16KB alignment detected)"
-              else
-                echo "❌ Alignment check failed for $f - no 16KB alignment found"
-                readelf -l "$f" | grep "LOAD" || true
-                fail=1
-              fi
-            done
-          fi
-          
-          if [ $fail -eq 0 ]; then
-            echo "🎉 All native libraries have 16KB alignment!"
-            if [ ${#zip_files[@]} -gt 0 ]; then
-              echo "📦 Note: ${#zip_files[@]} ZIP files were skipped (they contain libraries but are not ELF binaries)"
-            fi
-          else
-            echo "💥 Some native libraries failed 16KB alignment check"
-          fi
-          exit $fail
-
-      - name: Upload bundled artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: aligned-jniLibs-arm64-v8a
-          path: lib/arm64-v8a

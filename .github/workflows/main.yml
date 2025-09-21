@@ -210,6 +210,16 @@ jobs:
             git clone --depth 1 https://github.com/termux/termux-packages.git
           fi
 
+      - name: Force 16KB alignment in aria2 package
+        if: steps.aria2_deb_cache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          pkg=termux-packages/packages/aria2/build.sh
+          if [ -f "$pkg" ]; then
+            # Append extra LDFLAGS inside package build environment
+            echo 'TERMUX_PKG_EXTRA_LDFLAGS+=" -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 "' | tee -a "$pkg"
+          fi
+
       - name: Build aria2
         working-directory: termux-packages
         if: steps.aria2_deb_cache.outputs.cache-hit != 'true'
@@ -310,6 +320,15 @@ jobs:
         run: |
           if [ ! -d termux-packages ]; then
             git clone --depth 1 https://github.com/termux/termux-packages.git
+          fi
+
+      - name: Force 16KB alignment in Python package
+        if: steps.python_deb_cache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          pkg=termux-packages/packages/python/build.sh
+          if [ -f "$pkg" ]; then
+            echo 'TERMUX_PKG_EXTRA_LDFLAGS+=" -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 "' | tee -a "$pkg"
           fi
 
       - name: Build Python
@@ -432,6 +451,83 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  assemble-jniLibs:
+    name: Assemble jniLibs (end-to-end)
+    runs-on: ubuntu-latest
+    needs: [stage-aria2-zip, stage-python-zip]
+    if: ${{ inputs.stage_only != 'true' }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev llvm zip unzip file
+      - name: Download aria2 deb artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: aria2-debs
+          path: _aria2_debs
+      - name: Download python deb artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: python-debs
+          path: _python_debs
+      - name: Download staged zips
+        uses: actions/download-artifact@v5
+        with:
+          pattern: "*arm64"
+          path: _staged
+          merge-multiple: true
+      - name: Extract debs and assemble jniLibs
+        run: |
+          set -euxo pipefail
+          mkdir -p out/jniLibs/arm64-v8a out/tmp/aria2 out/tmp/python
+          for f in _aria2_debs/*.deb; do dpkg-deb -x "$f" out/tmp/aria2 || true; done
+          for f in _python_debs/*.deb; do dpkg-deb -x "$f" out/tmp/python || true; done
+          # Copy staged zips if present
+          [ -f _staged/libaria2c.zip ] && cp _staged/libaria2c.zip out/jniLibs/arm64-v8a/libaria2c.zip.so || true
+          [ -f _staged/libpython.zip ] && cp _staged/libpython.zip out/jniLibs/arm64-v8a/libpython.zip.so || true
+          # If zip not present, create from debs
+          if [ ! -f out/jniLibs/arm64-v8a/libaria2c.zip.so ]; then
+            for p in out/tmp/aria2/data/youtubedl-android/usr out/tmp/aria2/data/data/com.termux/files/usr out/tmp/aria2/data/usr out/tmp/aria2/usr; do
+              if [ -d "$p/lib" ]; then (cd "$(dirname "$p")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libaria2c.zip.so" "$(basename "$p")"/lib); break; fi
+            done
+          fi
+          if [ ! -f out/jniLibs/arm64-v8a/libpython.zip.so ]; then
+            for p in out/tmp/python/data/youtubedl-android/usr out/tmp/python/data/data/com.termux/files/usr out/tmp/python/data/usr out/tmp/python/usr; do
+              if [ -d "$p/lib" ]; then (cd "$(dirname "$p")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libpython.zip.so" "$(basename "$p")"/lib); break; fi
+            done
+          fi
+          # aria2c ELF
+          a2=$(find out/tmp/aria2 -type f -path '*/usr/bin/aria2c' -print -quit || true)
+          [ -z "$a2" ] && a2=$(find out/tmp/aria2 -type f -name aria2c -print -quit || true)
+          if [ -n "$a2" ] && file -b "$a2" | grep -qi ELF; then cp "$a2" out/jniLibs/arm64-v8a/libaria2c.so; fi
+          # libpython*.so ELF
+          pys=""
+          for cand in $(find out/tmp/python -type f -path '*/usr/lib/*' -name 'libpython*.so*' | sort); do
+            if file -b "$cand" | grep -qi ELF; then pys="$cand"; break; fi
+          done
+          if [ -n "$pys" ]; then cp "$pys" out/jniLibs/arm64-v8a/libpython.so; fi
+      - name: Verify 16KB PT_LOAD alignment
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in out/jniLibs/arm64-v8a/*.so; do
+            [[ "$f" == *.zip.so ]] && continue
+            echo Checking $f
+            llvm-readobj --program-headers "$f" | grep -A3 "Type: PT_LOAD" | grep -q "Alignment: 16384"
+          done
+      - name: Upload jniLibs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jniLibs-arm64
+          path: out/jniLibs/arm64-v8a
+          if-no-files-found: error
+          retention-days: 14
+
   stage-aria2-zip-reuse:
     name: Stage aria2 ZIP (reuse artifacts)
     runs-on: ubuntu-latest
@@ -495,5 +591,77 @@ jobs:
         with:
           name: python-arm64
           path: out/libpython.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble-jniLibs-reuse:
+    name: Assemble jniLibs (reuse artifacts)
+    runs-on: ubuntu-latest
+    if: ${{ inputs.stage_only == 'true' }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev llvm zip unzip file
+      - name: Download debs from run
+        uses: actions/download-artifact@v5
+        with:
+          pattern: "*-debs"
+          path: _debs
+          run-id: ${{ inputs.reuse_run_id }}
+          merge-multiple: true
+      - name: Download staged zips from run
+        uses: actions/download-artifact@v5
+        with:
+          pattern: "*arm64"
+          path: _staged
+          run-id: ${{ inputs.reuse_run_id }}
+          merge-multiple: true
+      - name: Assemble
+        run: |
+          set -euxo pipefail
+          mkdir -p out/jniLibs/arm64-v8a out/tmp/aria2 out/tmp/python
+          for f in _debs/*.deb; do
+            if echo "$f" | grep -qi aria2; then dpkg-deb -x "$f" out/tmp/aria2; fi
+            if echo "$f" | grep -qi python; then dpkg-deb -x "$f" out/tmp/python; fi
+          done
+          [ -f _staged/libaria2c.zip ] && cp _staged/libaria2c.zip out/jniLibs/arm64-v8a/libaria2c.zip.so || true
+          [ -f _staged/libpython.zip ] && cp _staged/libpython.zip out/jniLibs/arm64-v8a/libpython.zip.so || true
+          if [ ! -f out/jniLibs/arm64-v8a/libaria2c.zip.so ]; then
+            for p in out/tmp/aria2/data/youtubedl-android/usr out/tmp/aria2/data/data/com.termux/files/usr out/tmp/aria2/data/usr out/tmp/aria2/usr; do
+              if [ -d "$p/lib" ]; then (cd "$(dirname "$p")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libaria2c.zip.so" "$(basename "$p")"/lib); break; fi
+            done
+          fi
+          if [ ! -f out/jniLibs/arm64-v8a/libpython.zip.so ]; then
+            for p in out/tmp/python/data/youtubedl-android/usr out/tmp/python/data/data/com.termux/files/usr out/tmp/python/data/usr out/tmp/python/usr; do
+              if [ -d "$p/lib" ]; then (cd "$(dirname "$p")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libpython.zip.so" "$(basename "$p")"/lib); break; fi
+            done
+          fi
+          a2=$(find out/tmp/aria2 -type f -path '*/usr/bin/aria2c' -print -quit || true)
+          [ -z "$a2" ] && a2=$(find out/tmp/aria2 -type f -name aria2c -print -quit || true)
+          if [ -n "$a2" ] && file -b "$a2" | grep -qi ELF; then cp "$a2" out/jniLibs/arm64-v8a/libaria2c.so; fi
+          pys=""
+          for cand in $(find out/tmp/python -type f -path '*/usr/lib/*' -name 'libpython*.so*' | sort); do
+            if file -b "$cand" | grep -qi ELF; then pys="$cand"; break; fi
+          done
+          if [ -n "$pys" ]; then cp "$pys" out/jniLibs/arm64-v8a/libpython.so; fi
+      - name: Verify 16KB PT_LOAD alignment
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in out/jniLibs/arm64-v8a/*.so; do
+            [[ "$f" == *.zip.so ]] && continue
+            echo Checking $f
+            llvm-readobj --program-headers "$f" | grep -A3 "Type: PT_LOAD" | grep -q "Alignment: 16384"
+          done
+      - name: Upload jniLibs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jniLibs-arm64
+          path: out/jniLibs/arm64-v8a
           if-no-files-found: error
           retention-days: 14

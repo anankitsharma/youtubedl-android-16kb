@@ -194,13 +194,29 @@ jobs:
 
       - name: Stage aria2 outputs
         run: |
-          mkdir -p $GITHUB_WORKSPACE/out
-          find termux-packages/debs -type f -name "*.deb" -print -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/aria2 \; || true
-          cd $GITHUB_WORKSPACE/out/aria2 || exit 0
-          if [ -d data/youtubedl-android/usr/lib ]; then
-            (cd data/youtubedl-android && zip --symlinks -r $GITHUB_WORKSPACE/out/libaria2c.zip usr/lib)
-          else
-            echo "aria2 usr/lib not found in extracted debs" >&2
+          set -euxo pipefail
+          mkdir -p $GITHUB_WORKSPACE/out/aria2
+          # Extract all debs; we will validate presence next
+          found_any=$(find termux-packages/debs -type f -name "*.deb" -print | tee /dev/stderr | wc -l)
+          if [ "$found_any" -eq 0 ]; then
+            echo "No debs produced for aria2" >&2
+            exit 1
+          fi
+          find termux-packages/debs -type f -name "*.deb" -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/aria2 \;
+          cd $GITHUB_WORKSPACE/out/aria2
+          echo "Extracted tree (top-level under out/aria2):"
+          ls -la || true
+          # Try multiple known Termux prefixes and fallback heuristics
+          for prefix in data/youtubedl-android/usr data/data/com.termux/files/usr data/usr usr; do
+            if [ -d "$prefix/lib" ]; then
+              echo "Zipping libs from prefix: $prefix"
+              (cd "$(dirname "$prefix")" && zip --symlinks -r $GITHUB_WORKSPACE/out/libaria2c.zip "$(basename "$prefix")"/lib)
+              break
+            fi
+          done
+          if [ ! -f $GITHUB_WORKSPACE/out/libaria2c.zip ]; then
+            echo "aria2 usr/lib not found in extracted debs; candidates tried: data/youtubedl-android/usr, data/data/com.termux/files/usr, data/usr, usr" >&2
+            exit 1
           fi
 
       - name: Upload aria2 artifact
@@ -269,13 +285,27 @@ jobs:
 
       - name: Stage Python outputs
         run: |
-          mkdir -p $GITHUB_WORKSPACE/out
-          find termux-packages/debs -type f -name "*.deb" -print -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/python \; || true
-          cd $GITHUB_WORKSPACE/out/python || exit 0
-          if [ -d data/youtubedl-android/usr/lib ]; then
-            (cd data/youtubedl-android && zip --symlinks -r $GITHUB_WORKSPACE/out/libpython.zip usr/lib)
-          else
-            echo "python usr/lib not found in extracted debs" >&2
+          set -euxo pipefail
+          mkdir -p $GITHUB_WORKSPACE/out/python
+          found_any=$(find termux-packages/debs -type f -name "*.deb" -print | tee /dev/stderr | wc -l)
+          if [ "$found_any" -eq 0 ]; then
+            echo "No debs produced for python" >&2
+            exit 1
+          fi
+          find termux-packages/debs -type f -name "*.deb" -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/python \;
+          cd $GITHUB_WORKSPACE/out/python
+          echo "Extracted tree (top-level under out/python):"
+          ls -la || true
+          for prefix in data/youtubedl-android/usr data/data/com.termux/files/usr data/usr usr; do
+            if [ -d "$prefix/lib" ]; then
+              echo "Zipping libs from prefix: $prefix"
+              (cd "$(dirname "$prefix")" && zip --symlinks -r $GITHUB_WORKSPACE/out/libpython.zip "$(basename "$prefix")"/lib)
+              break
+            fi
+          done
+          if [ ! -f $GITHUB_WORKSPACE/out/libpython.zip ]; then
+            echo "python usr/lib not found in extracted debs; candidates tried: data/youtubedl-android/usr, data/data/com.termux/files/usr, data/usr, usr" >&2
+            exit 1
           fi
 
       - name: Upload Python artifact

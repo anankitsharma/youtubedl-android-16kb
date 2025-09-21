@@ -13,6 +13,7 @@ jobs:
     name: Build FFmpeg (arm64, direct NDK)
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    if: false
     env:
       API: 21
       EXTRA_LDFLAGS: "-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
@@ -151,6 +152,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y zip unzip dpkg-dev binutils llvm
+          docker --version || true
 
       - name: Restore caches
         uses: actions/cache@v4
@@ -185,24 +187,25 @@ jobs:
           chmod +x build-aria2.sh
           ./build-aria2.sh
 
+      - name: List built aria2 debs
+        run: |
+          echo "Listing debs after aria2 build:"
+          ls -la termux-packages/debs || true
+
       - name: Stage aria2 outputs
         run: |
           find termux-packages/debs -type f -name "*.deb" -print -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/aria2 \; || true
           cd $GITHUB_WORKSPACE/out/aria2 || exit 0
-          mkdir -p $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a
+          mkdir -p $GITHUB_WORKSPACE/lib/arm64-v8a
           aria2c_path=$(find data -type f -name aria2c 2>/dev/null | head -n1 || true)
-          [ -n "$aria2c_path" ] && cp "$aria2c_path" $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libaria2c.so || true
-          if [ -d data/youtubedl-android/usr/lib ]; then
-            (cd data/youtubedl-android && zip --symlinks -r $GITHUB_WORKSPACE/out/libaria2c.zip usr/lib)
-            cp $GITHUB_WORKSPACE/out/libaria2c.zip $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libaria2c.zip.so
-          fi
+          [ -n "$aria2c_path" ] && cp "$aria2c_path" $GITHUB_WORKSPACE/lib/arm64-v8a/libaria2c.so || true
 
       - name: Upload aria2 artifact
         uses: actions/upload-artifact@v4
         with:
           name: aria2-arm64
-          path: out/jniLibs/arm64-v8a
-          if-no-files-found: ignore
+          path: lib/arm64-v8a
+          if-no-files-found: error
 
   build-python:
     name: Build Python (arm64)
@@ -221,6 +224,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y zip unzip dpkg-dev binutils llvm
+          docker --version || true
 
       - name: Restore caches
         uses: actions/cache@v4
@@ -255,29 +259,30 @@ jobs:
           chmod +x build-python.sh
           ./build-python.sh
 
+      - name: List built Python debs
+        run: |
+          echo "Listing debs after Python build:"
+          ls -la termux-packages/debs || true
+
       - name: Stage Python outputs
         run: |
           find termux-packages/debs -type f -name "*.deb" -print -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/python \; || true
           cd $GITHUB_WORKSPACE/out/python || exit 0
-          mkdir -p $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a
+          mkdir -p $GITHUB_WORKSPACE/lib/arm64-v8a
           lp=$(find data/youtubedl-android/usr/lib -maxdepth 1 -type f -name "libpython*.so" | head -n1 || true)
-          [ -n "$lp" ] && cp "$lp" $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libpython.so || true
-          if [ -d data/youtubedl-android/usr/lib ]; then
-            (cd data/youtubedl-android && zip --symlinks -r $GITHUB_WORKSPACE/out/libpython.zip usr/lib)
-            cp $GITHUB_WORKSPACE/out/libpython.zip $GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libpython.zip.so
-          fi
+          [ -n "$lp" ] && cp "$lp" $GITHUB_WORKSPACE/lib/arm64-v8a/libpython.so || true
 
       - name: Upload Python artifact
         uses: actions/upload-artifact@v4
         with:
           name: python-arm64
-          path: out/jniLibs/arm64-v8a
-          if-no-files-found: ignore
+          path: lib/arm64-v8a
+          if-no-files-found: error
 
   verify-and-bundle:
     name: Verify alignment and bundle
     runs-on: ubuntu-latest
-    needs: [build-ffmpeg, build-aria2, build-python]
+    needs: [build-aria2, build-python]
     if: ${{ always() }}
     timeout-minutes: 60
     steps:
@@ -315,14 +320,14 @@ jobs:
 
       - name: Merge outputs
         run: |
-          mkdir -p out/jniLibs/arm64-v8a
-          find _artifacts -type f -name "*.so" -exec cp {} out/jniLibs/arm64-v8a/ \; || true
+          mkdir -p lib/arm64-v8a
+          find _artifacts -type f -name "*.so" -exec cp {} lib/arm64-v8a/ \; || true
 
       - name: Verify 16KB alignment (PT_LOAD only)
         run: |
           set -euxo pipefail
           shopt -s nullglob
-          files=(out/jniLibs/arm64-v8a/*.so)
+          files=(lib/arm64-v8a/*.so)
           if [ ${#files[@]} -eq 0 ]; then
             echo "No .so files found to verify" && exit 1
           fi
@@ -407,4 +412,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aligned-jniLibs-arm64-v8a
-          path: out/jniLibs/arm64-v8a
+          path: lib/arm64-v8a

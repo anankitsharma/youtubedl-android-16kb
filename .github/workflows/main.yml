@@ -232,7 +232,8 @@ jobs:
           export TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME}
           export MAKEFLAGS=${MAKEFLAGS}
           export LDFLAGS="${LDFLAGS:-} ${EXTRA_LDFLAGS}"
-          ./scripts/run-docker.sh env TERMUX_ARCH=${TERMUX_ARCH} TERMUX_PREFIX=${TERMUX_PREFIX} TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} LDFLAGS="${LDFLAGS}" ./build-package.sh aria2
+          # Force rebuild to avoid reusing prebuilt debs from cache
+          ./scripts/run-docker.sh env TERMUX_ARCH=${TERMUX_ARCH} TERMUX_PREFIX=${TERMUX_PREFIX} TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} LDFLAGS="${LDFLAGS}" ./build-package.sh -f aria2
           EOS
           chmod +x build-aria2.sh
           ./build-aria2.sh
@@ -343,7 +344,7 @@ jobs:
           export TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME}
           export MAKEFLAGS=${MAKEFLAGS}
           export LDFLAGS="${LDFLAGS:-} ${EXTRA_LDFLAGS}"
-          ./scripts/run-docker.sh env TERMUX_ARCH=${TERMUX_ARCH} TERMUX_PREFIX=${TERMUX_PREFIX} TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} LDFLAGS="${LDFLAGS}" ./build-package.sh python
+          ./scripts/run-docker.sh env TERMUX_ARCH=${TERMUX_ARCH} TERMUX_PREFIX=${TERMUX_PREFIX} TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} LDFLAGS="${LDFLAGS}" ./build-package.sh -f python
           EOS
           chmod +x build-python.sh
           ./build-python.sh

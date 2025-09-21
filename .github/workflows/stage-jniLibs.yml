@@ -45,42 +45,56 @@ jobs:
           sudo apt-get install -y dpkg-dev llvm zip unzip
           gh --version || true
 
+      - name: List artifacts in source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          echo "Listing artifacts for run: ${{ inputs.reuse_run_id }} in ${{ github.repository }}"
+          gh api repos/${{ github.repository }}/actions/runs/${{ inputs.reuse_run_id }}/artifacts --paginate -q '.artifacts[] | .name + " (id:" + (.id|tostring) + ")"' || true
+
       - name: Download staged aria2 ZIP
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         continue-on-error: true
         with:
           name: ${{ inputs.aria2_artifact }}
           path: _aria2_zip
           run-id: ${{ inputs.reuse_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Download staged Python ZIP
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         continue-on-error: true
         with:
           name: ${{ inputs.python_artifact }}
           path: _python_zip
           run-id: ${{ inputs.reuse_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Download aria2 debs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         continue-on-error: true
         with:
           name: ${{ inputs.aria2_debs_artifact }}
           path: _aria2_debs
           run-id: ${{ inputs.reuse_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Fallback download aria2 debs by pattern
         if: ${{ always() }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         continue-on-error: true
         with:
           pattern: aria2-*
           path: _aria2_debs
           merge-multiple: true
           run-id: ${{ inputs.reuse_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Fallback download artifacts via gh (aria2)
         if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
           mkdir -p _aria2_debs _aria2_zip
@@ -95,13 +109,14 @@ jobs:
 
       - name: Fallback download ALL artifacts (any name)
         if: ${{ always() }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         continue-on-error: true
         with:
           pattern: "*"
           path: _all_artifacts
           merge-multiple: true
           run-id: ${{ inputs.reuse_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Consolidate debs from any downloaded artifacts
         if: ${{ always() }}
@@ -131,25 +146,29 @@ jobs:
           fi
 
       - name: Download Python debs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         continue-on-error: true
         with:
           name: ${{ inputs.python_debs_artifact }}
           path: _python_debs
           run-id: ${{ inputs.reuse_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Fallback download Python debs by pattern
         if: ${{ always() }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         continue-on-error: true
         with:
           pattern: python-*
           path: _python_debs
           merge-multiple: true
           run-id: ${{ inputs.reuse_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Fallback download artifacts via gh (python)
         if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
           mkdir -p _python_debs _python_zip

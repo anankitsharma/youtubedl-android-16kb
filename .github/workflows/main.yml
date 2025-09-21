@@ -2,6 +2,29 @@ name: Build aligned native libs (16KB)
 
 on:
   workflow_dispatch:
+    inputs:
+      build_aria2:
+        description: "Build aria2 debs"
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true','false']
+      build_python:
+        description: "Build Python debs"
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true','false']
+      stage_only:
+        description: "Skip builds; only stage ZIPs from artifacts"
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true','false']
+      reuse_run_id:
+        description: "Optional run id to reuse deb artifacts from"
+        required: false
+        type: string
 
 # Allow multiple runs; we prefer reliability over cancellation
 concurrency:
@@ -139,6 +162,7 @@ jobs:
     name: Build aria2 (arm64)
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    if: ${{ inputs.stage_only != 'true' && inputs.build_aria2 == 'true' }}
     env:
       TERMUX_ARCH: aarch64
       TERMUX_PREFIX: /data/youtubedl-android/usr
@@ -192,44 +216,18 @@ jobs:
           echo "Listing debs after aria2 build:"
           ls -la termux-packages/debs || true
 
-      - name: Stage aria2 outputs
-        run: |
-          set -euxo pipefail
-          mkdir -p $GITHUB_WORKSPACE/out/aria2
-          # Extract all debs; we will validate presence next
-          found_any=$(find termux-packages/debs -type f -name "*.deb" -print | tee /dev/stderr | wc -l)
-          if [ "$found_any" -eq 0 ]; then
-            echo "No debs produced for aria2" >&2
-            exit 1
-          fi
-          find termux-packages/debs -type f -name "*.deb" -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/aria2 \;
-          cd $GITHUB_WORKSPACE/out/aria2
-          echo "Extracted tree (top-level under out/aria2):"
-          ls -la || true
-          # Try multiple known Termux prefixes and fallback heuristics
-          for prefix in data/youtubedl-android/usr data/data/com.termux/files/usr data/usr usr; do
-            if [ -d "$prefix/lib" ]; then
-              echo "Zipping libs from prefix: $prefix"
-              (cd "$(dirname "$prefix")" && zip --symlinks -r $GITHUB_WORKSPACE/out/libaria2c.zip "$(basename "$prefix")"/lib)
-              break
-            fi
-          done
-          if [ ! -f $GITHUB_WORKSPACE/out/libaria2c.zip ]; then
-            echo "aria2 usr/lib not found in extracted debs; candidates tried: data/youtubedl-android/usr, data/data/com.termux/files/usr, data/usr, usr" >&2
-            exit 1
-          fi
-
-      - name: Upload aria2 artifact
+      - name: Upload aria2 deb artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: aria2-arm64
-          path: out/libaria2c.zip
+          name: aria2-debs
+          path: termux-packages/debs
           if-no-files-found: error
 
   build-python:
     name: Build Python (arm64)
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    if: ${{ inputs.stage_only != 'true' && inputs.build_python == 'true' }}
     env:
       TERMUX_ARCH: aarch64
       TERMUX_PREFIX: /data/youtubedl-android/usr
@@ -283,36 +281,141 @@ jobs:
           echo "Listing debs after Python build:"
           ls -la termux-packages/debs || true
 
-      - name: Stage Python outputs
+      - name: Upload Python deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-debs
+          path: termux-packages/debs
+          if-no-files-found: error
+
+  stage-aria2-zip:
+    name: Stage aria2 ZIP
+    runs-on: ubuntu-latest
+    needs: [build-aria2]
+    if: ${{ inputs.stage_only != 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download aria2 deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: aria2-debs
+          path: _aria2_debs
+      - name: Create aria2 ZIP
+        run: |
+          set -euxo pipefail
+          mkdir -p $GITHUB_WORKSPACE/out/aria2
+          find _aria2_debs -type f -name "*.deb" -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/aria2 \;
+          cd $GITHUB_WORKSPACE/out/aria2
+          for prefix in data/youtubedl-android/usr data/data/com.termux/files/usr data/usr usr; do
+            if [ -d "$prefix/lib" ]; then
+              (cd "$(dirname "$prefix")" && zip --symlinks -r $GITHUB_WORKSPACE/out/libaria2c.zip "$(basename "$prefix")"/lib)
+              break
+            fi
+          done
+          [ -f $GITHUB_WORKSPACE/out/libaria2c.zip ]
+      - name: Upload aria2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aria2-arm64
+          path: out/libaria2c.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  stage-python-zip:
+    name: Stage Python ZIP
+    runs-on: ubuntu-latest
+    needs: [build-python]
+    if: ${{ inputs.stage_only != 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Python deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-debs
+          path: _python_debs
+      - name: Create Python ZIP
         run: |
           set -euxo pipefail
           mkdir -p $GITHUB_WORKSPACE/out/python
-          found_any=$(find termux-packages/debs -type f -name "*.deb" -print | tee /dev/stderr | wc -l)
-          if [ "$found_any" -eq 0 ]; then
-            echo "No debs produced for python" >&2
-            exit 1
-          fi
-          find termux-packages/debs -type f -name "*.deb" -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/python \;
+          find _python_debs -type f -name "*.deb" -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/python \;
           cd $GITHUB_WORKSPACE/out/python
-          echo "Extracted tree (top-level under out/python):"
-          ls -la || true
           for prefix in data/youtubedl-android/usr data/data/com.termux/files/usr data/usr usr; do
             if [ -d "$prefix/lib" ]; then
-              echo "Zipping libs from prefix: $prefix"
               (cd "$(dirname "$prefix")" && zip --symlinks -r $GITHUB_WORKSPACE/out/libpython.zip "$(basename "$prefix")"/lib)
               break
             fi
           done
-          if [ ! -f $GITHUB_WORKSPACE/out/libpython.zip ]; then
-            echo "python usr/lib not found in extracted debs; candidates tried: data/youtubedl-android/usr, data/data/com.termux/files/usr, data/usr, usr" >&2
-            exit 1
-          fi
-
+          [ -f $GITHUB_WORKSPACE/out/libpython.zip ]
       - name: Upload Python artifact
         uses: actions/upload-artifact@v4
         with:
           name: python-arm64
           path: out/libpython.zip
           if-no-files-found: error
+          retention-days: 14
 
-  # verify-and-bundle job removed intentionally; we only upload ZIPs from build jobs
+  stage-aria2-zip-reuse:
+    name: Stage aria2 ZIP (reuse artifacts)
+    runs-on: ubuntu-latest
+    if: ${{ inputs.stage_only == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download aria2 deb artifacts from run
+        uses: actions/download-artifact@v4
+        with:
+          name: aria2-debs
+          path: _aria2_debs
+          run-id: ${{ inputs.reuse_run_id }}
+      - name: Create aria2 ZIP
+        run: |
+          set -euxo pipefail
+          mkdir -p $GITHUB_WORKSPACE/out/aria2
+          find _aria2_debs -type f -name "*.deb" -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/aria2 \;
+          cd $GITHUB_WORKSPACE/out/aria2
+          for prefix in data/youtubedl-android/usr data/data/com.termux/files/usr data/usr usr; do
+            if [ -d "$prefix/lib" ]; then
+              (cd "$(dirname "$prefix")" && zip --symlinks -r $GITHUB_WORKSPACE/out/libaria2c.zip "$(basename "$prefix")"/lib)
+              break
+            fi
+          done
+          [ -f $GITHUB_WORKSPACE/out/libaria2c.zip ]
+      - name: Upload aria2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aria2-arm64
+          path: out/libaria2c.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  stage-python-zip-reuse:
+    name: Stage Python ZIP (reuse artifacts)
+    runs-on: ubuntu-latest
+    if: ${{ inputs.stage_only == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Python deb artifacts from run
+        uses: actions/download-artifact@v4
+        with:
+          name: python-debs
+          path: _python_debs
+          run-id: ${{ inputs.reuse_run_id }}
+      - name: Create Python ZIP
+        run: |
+          set -euxo pipefail
+          mkdir -p $GITHUB_WORKSPACE/out/python
+          find _python_debs -type f -name "*.deb" -exec dpkg-deb -x {} $GITHUB_WORKSPACE/out/python \;
+          cd $GITHUB_WORKSPACE/out/python
+          for prefix in data/youtubedl-android/usr data/data/com.termux/files/usr data/usr usr; do
+            if [ -d "$prefix/lib" ]; then
+              (cd "$(dirname "$prefix")" && zip --symlinks -r $GITHUB_WORKSPACE/out/libpython.zip "$(basename "$prefix")"/lib)
+              break
+            fi
+          done
+          [ -f $GITHUB_WORKSPACE/out/libpython.zip ]
+      - name: Upload Python artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-arm64
+          path: out/libpython.zip
+          if-no-files-found: error
+          retention-days: 14

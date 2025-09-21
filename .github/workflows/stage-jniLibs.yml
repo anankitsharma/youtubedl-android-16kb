@@ -46,6 +46,7 @@ jobs:
 
       - name: Download staged aria2 ZIP
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ inputs.aria2_artifact }}
           path: _aria2_zip
@@ -53,6 +54,7 @@ jobs:
 
       - name: Download staged Python ZIP
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ inputs.python_artifact }}
           path: _python_zip
@@ -77,16 +79,35 @@ jobs:
           set -euxo pipefail
           mkdir -p out/jniLibs/arm64-v8a out/tmp/aria2 out/tmp/python
 
-          # Stage .zip.so payloads
-          test -f _aria2_zip/libaria2c.zip
-          test -f _python_zip/libpython.zip
-          cp _aria2_zip/libaria2c.zip out/jniLibs/arm64-v8a/libaria2c.zip.so
-          cp _python_zip/libpython.zip out/jniLibs/arm64-v8a/libpython.zip.so
-
           # Extract debs into temporary roots
           shopt -s nullglob
           for f in _aria2_debs/*.deb; do dpkg-deb -x "$f" out/tmp/aria2; done
           for f in _python_debs/*.deb; do dpkg-deb -x "$f" out/tmp/python; done
+
+          # Determine prefixes for aria2 and python
+          aria2_prefix=""
+          for p in out/tmp/aria2/data/youtubedl-android/usr out/tmp/aria2/data/data/com.termux/files/usr out/tmp/aria2/data/usr out/tmp/aria2/usr; do
+            if [ -d "$p/lib" ]; then aria2_prefix="$p"; break; fi
+          done
+          python_prefix=""
+          for p in out/tmp/python/data/youtubedl-android/usr out/tmp/python/data/data/com.termux/files/usr out/tmp/python/data/usr out/tmp/python/usr; do
+            if [ -d "$p/lib" ]; then python_prefix="$p"; break; fi
+          done
+
+          # Stage .zip.so payloads, build from debs if staged zips missing
+          if [ -f _aria2_zip/libaria2c.zip ]; then
+            cp _aria2_zip/libaria2c.zip out/jniLibs/arm64-v8a/libaria2c.zip.so
+          else
+            if [ -z "$aria2_prefix" ]; then echo "::error::Could not find aria2 prefix to build zip"; exit 1; fi
+            (cd "$(dirname "$aria2_prefix")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libaria2c.zip.so" "$(basename "$aria2_prefix")"/lib)
+          fi
+
+          if [ -f _python_zip/libpython.zip ]; then
+            cp _python_zip/libpython.zip out/jniLibs/arm64-v8a/libpython.zip.so
+          else
+            if [ -z "$python_prefix" ]; then echo "::error::Could not find python prefix to build zip"; exit 1; fi
+            (cd "$(dirname "$python_prefix")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libpython.zip.so" "$(basename "$python_prefix")"/lib)
+          fi
 
           # Find aria2c executable and rename to libaria2c.so
           aria2c_path=$(find out/tmp/aria2 -type f -name aria2c | head -n1 || true)

@@ -1,0 +1,141 @@
+name: Stage drop-in jniLibs (from repo outputfiles)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to checkout (for repo files)"
+        required: false
+        default: "main"
+        type: string
+
+jobs:
+  stage-jniLibs:
+    name: Assemble ready-to-drop jniLibs (from repo files)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repo (branch: ${{ inputs.branch }})
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev binutils zip unzip
+
+      - name: Prepare workspace and unpack repo zips
+        run: |
+          set -euxo pipefail
+          mkdir -p _aria2_zip _python_zip _aria2_debs _python_debs out/tmp/aria2 out/tmp/python out/jniLibs/arm64-v8a
+
+          # Paths to files in repo
+          ARIA2_ARM64_REPO="outputfiles/aria2-arm64.zip"
+          ARIA2_DEBS_REPO="outputfiles/aria2-debs.zip"
+          PY_ARM64_REPO="outputfiles/python-arm64.zip"
+          PY_DEBS_REPO="outputfiles/python-debs.zip"
+
+          # Unpack aria2-arm64.zip into _aria2_zip (if present)
+          if [ -f "$ARIA2_ARM64_REPO" ]; then
+            unzip -o "$ARIA2_ARM64_REPO" -d _aria2_zip
+          else
+            echo "Warning: $ARIA2_ARM64_REPO not found in repo; _aria2_zip will be empty"
+          fi
+
+          # Unpack python-arm64.zip into _python_zip
+          if [ -f "$PY_ARM64_REPO" ]; then
+            unzip -o "$PY_ARM64_REPO" -d _python_zip
+          else
+            echo "Warning: $PY_ARM64_REPO not found in repo; _python_zip will be empty"
+          fi
+
+          # Unpack deb zips into _aria2_debs and _python_debs
+          if [ -f "$ARIA2_DEBS_REPO" ]; then
+            unzip -o "$ARIA2_DEBS_REPO" -d _aria2_debs
+          else
+            echo "Warning: $ARIA2_DEBS_REPO not found in repo; _aria2_debs will be empty"
+          fi
+
+          if [ -f "$PY_DEBS_REPO" ]; then
+            unzip -o "$PY_DEBS_REPO" -d _python_debs
+          else
+            echo "Warning: $PY_DEBS_REPO not found in repo; _python_debs will be empty"
+          fi
+
+      - name: Extract debs and assemble jniLibs (from repo unpack)
+        run: |
+          set -euxo pipefail
+          mkdir -p out/tmp/aria2 out/tmp/python
+
+          # Extract any .deb files found in the deb zip directories
+          shopt -s nullglob
+          for f in _aria2_debs/*.deb; do dpkg-deb -x "$f" out/tmp/aria2 || true; done
+          for f in _python_debs/*.deb; do dpkg-deb -x "$f" out/tmp/python || true; done
+
+          # If uploaded aria2-arm64.zip contained a libaria2c.zip (or similar), locate it
+          # Search _aria2_zip for libaria2c.zip (could be at root or nested)
+          aria2_zip_candidate=$(find _aria2_zip -type f -iname "libaria2c.zip" | head -n1 || true)
+          python_zip_candidate=$(find _python_zip -type f -iname "libpython.zip" | head -n1 || true)
+
+          # Determine prefixes for aria2 and python (from extracted debs)
+          aria2_prefix=""
+          for p in out/tmp/aria2/data/youtubedl-android/usr out/tmp/aria2/data/data/com.termux/files/usr out/tmp/aria2/data/usr out/tmp/aria2/usr; do
+            if [ -d "$p/lib" ]; then aria2_prefix="$p"; break; fi
+          done
+          python_prefix=""
+          for p in out/tmp/python/data/youtubedl-android/usr out/tmp/python/data/data/com.termux/files/usr out/tmp/python/data/usr out/tmp/python/usr; do
+            if [ -d "$p/lib" ]; then python_prefix="$p"; break; fi
+          done
+
+          # Stage libaria2c.zip.so either from repo zip (if present) or build from extracted debs
+          if [ -n "$aria2_zip_candidate" ]; then
+            echo "Using libaria2c.zip from repo zip: $aria2_zip_candidate"
+            cp "$aria2_zip_candidate" out/jniLibs/arm64-v8a/libaria2c.zip.so
+          else
+            if [ -z "$aria2_prefix" ]; then echo "::error::Could not find aria2 prefix to build zip"; exit 1; fi
+            (cd "$(dirname "$aria2_prefix")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libaria2c.zip.so" "$(basename "$aria2_prefix")"/lib)
+          fi
+
+          # Stage libpython.zip.so either from repo zip (if present) or build
+          if [ -n "$python_zip_candidate" ]; then
+            echo "Using libpython.zip from repo zip: $python_zip_candidate"
+            cp "$python_zip_candidate" out/jniLibs/arm64-v8a/libpython.zip.so
+          else
+            if [ -z "$python_prefix" ]; then echo "::error::Could not find python prefix to build zip"; exit 1; fi
+            (cd "$(dirname "$python_prefix")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libpython.zip.so" "$(basename "$python_prefix")"/lib)
+          fi
+
+          # Find aria2c executable and copy to libaria2c.so
+          aria2c_path=$(find out/tmp/aria2 -type f -name aria2c | head -n1 || true)
+          if [ -z "$aria2c_path" ]; then
+            echo "::error::aria2c not found in aria2 debs"; exit 1
+          fi
+          cp "$aria2c_path" out/jniLibs/arm64-v8a/libaria2c.so
+
+          # Find versioned libpythonX.Y.so and copy as libpython.so
+          pyso_path=$(find out/tmp/python -type f -path "*/usr/lib/*" -name "libpython*.so" | head -n1 || true)
+          if [ -z "$pyso_path" ]; then
+            echo "::error::libpython*.so not found in python debs"; exit 1
+          fi
+          cp "$pyso_path" out/jniLibs/arm64-v8a/libpython.so
+
+      - name: Verify 16KB PT_LOAD alignment (using readelf)
+        run: |
+          set -euo pipefail
+          for f in out/jniLibs/arm64-v8a/*.so; do
+            echo "Checking $f"
+            if ! readelf -l "$f" | grep -A3 "Program Headers:" | grep -q "0x4000"; then
+              echo "::error::$f missing PT_LOAD alignment 0x4000 (16384)"; exit 1
+            fi
+          done
+
+      - name: Upload jniLibs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jniLibs-arm64
+          path: out/jniLibs/arm64-v8a
+          if-no-files-found: error
+          retention-days: 14

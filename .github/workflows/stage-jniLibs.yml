@@ -42,7 +42,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev llvm zip unzip
+          sudo apt-get install -y dpkg-dev llvm zip unzip file
           gh --version || true
 
       - name: List artifacts in source run
@@ -220,35 +220,48 @@ jobs:
             (cd "$(dirname "$python_prefix")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libpython.zip.so" "$(basename "$python_prefix")"/lib)
           fi
 
-          # Find aria2c executable and rename to libaria2c.so
-          aria2c_path=$(find out/tmp/aria2 -type f -name aria2c | head -n1 || true)
+          # Find aria2c executable (must be an ELF, prefer usr/bin)
+          aria2c_path=$(find out/tmp/aria2 -type f -path '*/usr/bin/aria2c' -print -quit || true)
           if [ -z "$aria2c_path" ]; then
+            aria2c_path=$(find out/tmp/aria2 -type f -path '*/bin/aria2c' -print -quit || true)
+          fi
+          if [ -z "$aria2c_path" ]; then
+            # As a last resort, pick any 'aria2c' that is an ELF
+            for cand in $(find out/tmp/aria2 -type f -name aria2c); do
+              if file -b "$cand" | grep -qi 'ELF'; then aria2c_path="$cand"; break; fi
+            done
+          fi
+          if [ -n "$aria2c_path" ] && file -b "$aria2c_path" | grep -qi 'ELF'; then
+            cp "$aria2c_path" out/jniLibs/arm64-v8a/libaria2c.so
+          else
             # Try from repo outputfiles if available
             repo_a2_so=$(find "$GITHUB_WORKSPACE/outputfiles" -type f -name libaria2c.so -print -quit || true)
             repo_a2_bin=$(find "$GITHUB_WORKSPACE/outputfiles" -type f -name aria2c -print -quit || true)
-            if [ -n "$repo_a2_so" ]; then
+            if [ -n "$repo_a2_so" ] && file -b "$repo_a2_so" | grep -qi 'ELF'; then
               cp "$repo_a2_so" out/jniLibs/arm64-v8a/libaria2c.so
-            elif [ -n "$repo_a2_bin" ]; then
+            elif [ -n "$repo_a2_bin" ] && file -b "$repo_a2_bin" | grep -qi 'ELF'; then
               cp "$repo_a2_bin" out/jniLibs/arm64-v8a/libaria2c.so
             else
-              echo "::error::aria2c not found in debs or repo outputfiles"; exit 1
+              echo "::error::aria2c ELF binary not found in debs or repo outputfiles"; exit 1
             fi
-          else
-            cp "$aria2c_path" out/jniLibs/arm64-v8a/libaria2c.so
           fi
 
-          # Find versioned libpythonX.Y.so and rename to libpython.so
-          pyso_path=$(find out/tmp/python -type f -path "*/usr/lib/*" -name "libpython*.so" | head -n1 || true)
-          if [ -z "$pyso_path" ]; then
+          # Find versioned libpython*.so that is a real ELF (avoid linker scripts)
+          pyso_path=""
+          # Prefer versioned .so.* files
+          for cand in $(find out/tmp/python -type f -path '*/usr/lib/*' -name 'libpython*.so*' | sort); do
+            if file -b "$cand" | grep -qi 'ELF'; then pyso_path="$cand"; break; fi
+          done
+          if [ -n "$pyso_path" ]; then
+            cp "$pyso_path" out/jniLibs/arm64-v8a/libpython.so
+          else
             # Try from repo outputfiles if available
-            repo_py_so=$(find "$GITHUB_WORKSPACE/outputfiles" -type f -name "libpython*.so" -print -quit || true)
-            if [ -n "$repo_py_so" ]; then
+            repo_py_so=$(find "$GITHUB_WORKSPACE/outputfiles" -type f -name 'libpython*.so*' -print -quit || true)
+            if [ -n "$repo_py_so" ] && file -b "$repo_py_so" | grep -qi 'ELF'; then
               cp "$repo_py_so" out/jniLibs/arm64-v8a/libpython.so
             else
-              echo "::error::libpython*.so not found in python debs or repo outputfiles"; exit 1
+              echo "::error::ELF libpython*.so not found in python debs or repo outputfiles"; exit 1
             fi
-          else
-            cp "$pyso_path" out/jniLibs/arm64-v8a/libpython.so
           fi
 
       - name: Verify 16KB PT_LOAD alignment

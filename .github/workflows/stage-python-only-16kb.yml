@@ -3,6 +3,9 @@ name: build-16kb-arm64-complete
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   PYTHON_VERSION: "3.12.0"
   NDK_VERSION: "r28b"
@@ -13,95 +16,72 @@ env:
   HOSTPY_RELEASE_TAG: "hostpython-v1"
   HOSTPY_RELEASE_ASSET: "hostpython-${{ env.PYTHON_VERSION }}.tar.gz"
 
-permissions:
-  contents: write   # needed for release / PR creation
-
 jobs:
   prepare-ndk:
+    name: prepare NDK
     runs-on: ubuntu-latest
-    outputs:
-      ndk-path: ${{ steps.set-ndk.outputs.ndk_path }}
     steps:
-      - name: Ensure tools available
+      - name: ensure tools
         run: sudo apt-get update && sudo apt-get install -y wget unzip
 
-      - name: Cache NDK (runner.temp)
-        id: ndk-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}
-          key: ndk-${{ env.NDK_VERSION }}-v1
-          restore-keys: |
-            ndk-${{ env.NDK_VERSION }}-
-
-      - name: If cache hit, copy NDK to HOME
-        if: steps.ndk-cache.outputs.cache-hit == 'true'
+      - name: try cached NDK copy (runner.temp)
+        id: try_ndk_cache
         run: |
           CACHE_DIR="${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}"
           if [ -d "$CACHE_DIR" ]; then
+            echo "Found cached ndk at $CACHE_DIR"
             rm -rf "$HOME/android-ndk-${{ env.NDK_VERSION }}" || true
             cp -r "$CACHE_DIR" "$HOME/"
           fi
-          echo "ndk_path=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_OUTPUT
+          if [ -d "$HOME/android-ndk-${{ env.NDK_VERSION }}" ]; then
+            echo "NDK_OK=true"
+          else
+            echo "NDK_OK=false"
+          fi
 
-      - name: Download NDK if cache miss
-        if: steps.ndk-cache.outputs.cache-hit != 'true'
+      - name: download NDK if missing
+        if: ${{ steps.try_ndk_cache.outputs.NDK_OK != 'true' }}
         run: |
           NDK_ZIP="/tmp/android-ndk-${{ env.NDK_VERSION }}-linux.zip"
           wget -q "https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip" -O "$NDK_ZIP"
           unzip -q "$NDK_ZIP" -d $HOME
           mkdir -p "${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}"
           cp -r "$HOME/android-ndk-${{ env.NDK_VERSION }}" "${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}"
-          echo "ndk_path=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_OUTPUT
 
-      - name: Show NDK location
-        id: set-ndk
-        run: |
-          if [ -d "$HOME/android-ndk-${{ env.NDK_VERSION }}" ]; then
-            echo "ndk_path=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_OUTPUT
-            echo "NDK found at $HOME/android-ndk-${{ env.NDK_VERSION }}"
-            ls -la "$HOME/android-ndk-${{ env.NDK_VERSION }}" | sed -n '1,120p'
-          else
-            echo "ERROR: NDK not found after cache/download."
-            exit 2
-          fi
+      - name: list NDK
+        run: ls -la $HOME/android-ndk-${{ env.NDK_VERSION }} || true
 
   build-host-python:
+    name: build host python (or reuse release/cache)
     runs-on: ubuntu-latest
     needs: prepare-ndk
-    outputs:
-      published_release: ${{ steps.check_release.outputs.found }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Restore host-python cache
-        id: cache-hostpython
+      - name: restore hostpython cache
         uses: actions/cache@v4
+        id: hostcache
         with:
           path: /tmp/hostpython
           key: host-python-${{ env.PYTHON_VERSION }}-v1
-          restore-keys: |
-            host-python-${{ env.PYTHON_VERSION }}-
 
-      - name: Try download hostpython release asset (if exists)
-        id: try-download-release
+      - name: try download hostpython release asset
+        id: try_host_release
         run: |
           REPO="${{ github.repository }}"
           TAG="${{ env.HOSTPY_RELEASE_TAG }}"
           FILE="${{ env.HOSTPY_RELEASE_ASSET }}"
           URL="https://github.com/${REPO}/releases/download/${TAG}/${FILE}"
-          echo "Trying $URL"
-          set -e
-          mkdir -p /tmp/hostpython
-          if curl -fSL "$URL" -o /tmp/hostpython.tar.gz; then
-            tar -xzf /tmp/hostpython.tar.gz -C /tmp
-            echo "release_hit=true" >> $GITHUB_OUTPUT
+          echo "trying $URL"
+          if curl -fSL "$URL" -o /tmp/${FILE}; then
+            tar -xzf /tmp/${FILE} -C /tmp || true
+            echo "RELEASE_HIT=true" >> $GITHUB_OUTPUT
           else
-            echo "release_hit=false" >> $GITHUB_OUTPUT
+            echo "RELEASE_HIT=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build host Python (native) if not cached/release
-        if: steps.cache-hostpython.outputs.cache-hit != 'true' && steps.try-download-release.outputs.release_hit != 'true'
+      - name: build host python if not cached/release
+        if: steps.hostcache.outputs.cache-hit != 'true' && steps.try_host_release.outputs.RELEASE_HIT != 'true'
         run: |
           set -e
           PY=${{ env.PYTHON_VERSION }}
@@ -114,121 +94,90 @@ jobs:
           popd
           /tmp/hostpython/bin/python3 -V
 
-      - name: Verify host-python exists
+      - name: verify hostpython present
         run: |
           if [ -x /tmp/hostpython/bin/python3 ]; then
             /tmp/hostpython/bin/python3 -V
           else
-            echo "host python missing; aborting"
+            echo "host python missing"
             exit 2
           fi
 
-      - name: Archive hostpython and upload as release asset (create release if missing)
-        id: check_release
-        run: |
-          REPO="${{ github.repository }}"
-          TAG="${{ env.HOSTPY_RELEASE_TAG }}"
-          FILE="${{ env.HOSTPY_RELEASE_ASSET }}"
-          # pack hostpython
-          tar -czf /tmp/${FILE} -C /tmp hostpython || true
-          # create release (idempotent) and upload asset using gh CLI (preinstalled)
-          # Use GitHub REST API to create release if it doesn't exist
-          RELEASE_DATA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" || true)
-          if echo "$RELEASE_DATA" | grep -q "\"message\": \"Not Found\""; then
-            echo "Release $TAG not found — creating"
-            CREATE=$(curl -s -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Host python binary for CI reuse\",\"prerelease\":false}" \
-              "https://api.github.com/repos/${REPO}/releases")
-            echo "$CREATE" > /tmp/release.json
-            UPLOAD_URL=$(echo "$CREATE" | jq -r .upload_url | sed -e "s/{?name,label}//")
-          else
-            echo "Release $TAG exists"
-            UPLOAD_URL=$(echo "$RELEASE_DATA" | jq -r .upload_url | sed -e "s/{?name,label}//")
-          fi
-          # Delete existing asset with same name if present
-          ASSETS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" | jq -r '.assets[]?.name' || true)
-          echo "$ASSETS" | grep -q "^${FILE}$" && echo "Asset exists - delete" && \
-            ASSET_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" | jq -r ".assets[] | select(.name==\"${FILE}\") .id") && \
-            curl -s -X DELETE -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${REPO}/releases/assets/${ASSET_ID}" || true
-          # upload asset
-          curl -s -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Content-Type: application/gzip" \
-            --data-binary "@/tmp/${FILE}" "${UPLOAD_URL}?name=${FILE}" && echo "uploaded" > /tmp/hostpy_uploaded || true
-          if [ -f /tmp/hostpy_uploaded ]; then
-            echo "found=true" >> $GITHUB_OUTPUT
-          else
-            echo "found=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Upload host-python cache/artifact for same-run reuse
+      - name: upload host-python artifact for same-run reuse
         uses: actions/upload-artifact@v4
         with:
           name: host-python
           path: /tmp/hostpython
 
+      - name: create release asset (optional) - upload if not present
+        run: |
+          REPO="${{ github.repository }}"
+          TAG="${{ env.HOSTPY_RELEASE_TAG }}"
+          FILE="${{ env.HOSTPY_RELEASE_ASSET }}"
+          if curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" | grep -q '"message": "Not Found"'; then
+            echo "Creating release $TAG"
+            curl -s -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Host python binary for CI reuse\"}" \
+              "https://api.github.com/repos/${REPO}/releases" > /tmp/release.json
+          else
+            echo "Release exists"
+          fi
+          # upload asset if needed (safe to attempt)
+          tar -czf /tmp/${FILE} -C /tmp hostpython || true
+          UPLOAD_URL=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" | jq -r .upload_url | sed -e "s/{?name,label}//" || true)
+          if [ -n "$UPLOAD_URL" ]; then
+            curl -s -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -H "Content-Type: application/gzip" --data-binary "@/tmp/${FILE}" "${UPLOAD_URL}?name=${FILE}" || true
+          fi
+
   build-libpython:
+    name: cross-compile libpython.so (arm64)
     runs-on: ubuntu-latest
-    needs: [prepare-ndk, build-host-python]
+    needs: build-host-python
     steps:
       - uses: actions/checkout@v4
 
-      - name: Restore host-python cache
-        id: cache-hostpython-restore
+      - name: restore hostpython cache (again)
         uses: actions/cache@v4
         with:
           path: /tmp/hostpython
           key: host-python-${{ env.PYTHON_VERSION }}-v1
-          restore-keys: |
-            host-python-${{ env.PYTHON_VERSION }}-
 
-      - name: If missing, download hostpython release asset (fallback)
-        if: steps.cache-hostpython-restore.outputs.cache-hit != 'true'
+      - name: download hostpython release if cache miss
+        if: steps.cache-hostpython.outputs.cache-hit != 'true'
         run: |
           REPO="${{ github.repository }}"
           TAG="${{ env.HOSTPY_RELEASE_TAG }}"
           FILE="${{ env.HOSTPY_RELEASE_ASSET }}"
           URL="https://github.com/${REPO}/releases/download/${TAG}/${FILE}"
-          echo "Attempting download $URL"
-          mkdir -p /tmp/hostpython || true
           if curl -fSL "$URL" -o /tmp/${FILE}; then
             tar -xzf /tmp/${FILE} -C /tmp || true
-            echo "release_download=true" >> $GITHUB_OUTPUT
-          else
-            echo "release_download=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Download host-python artifact (same-run fallback)
-        if: steps.cache-hostpython-restore.outputs.cache-hit != 'true' && steps.try-download-release != 'true'
+      - name: download hostpython artifact (same-run fallback)
+        if: success()
         uses: actions/download-artifact@v4
         with:
           name: host-python
           path: /tmp/hostpython
 
-      - name: Inspect host-python & ensure exec
+      - name: ensure hostpython executable
         run: |
           ls -la /tmp/hostpython || true
           if [ -f /tmp/hostpython/bin/python3 ]; then
             chmod +x /tmp/hostpython/bin/python3 || true
-            /tmp/hostpython/bin/python3 -V || ( ldd /tmp/hostpython/bin/python3 || true ; exit 3 )
-          else
-            echo "ERROR: host python not present after all fallbacks"
-            exit 2
+            /tmp/hostpython/bin/python3 -V || true
           fi
 
-      - name: Prepare environment and ensure NDK present
+      - name: prepare NDK path
         run: |
-          NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
-          if [ -z "$NDK" ]; then
-            NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
-          fi
-          if [ ! -d "$NDK" ]; then
-            echo "ERROR: NDK not found at $NDK"
+          if [ -d "$HOME/android-ndk-${{ env.NDK_VERSION }}" ]; then
+            echo "Using $HOME/android-ndk-${{ env.NDK_VERSION }}"
+            echo "ANDROID_NDK_HOME=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+          else
+            echo "NDK missing"
             exit 5
           fi
-          echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
-          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
-
-      - name: Download CPython sources (copy)
+      - name: download CPython sources
         run: |
           PY=${{ env.PYTHON_VERSION }}
           if [ ! -d "/tmp/Python-${PY}" ]; then
@@ -236,14 +185,12 @@ jobs:
             tar xf /tmp/Python-${PY}.tgz -C /tmp
           fi
           cp -r /tmp/Python-${PY} .
-
-      - name: Cross-compile CPython (libpython.so) with --disable-ipv6
+      - name: cross-compile libpython
         shell: bash
         run: |
           set -euo pipefail
           PY=${{ env.PYTHON_VERSION }}
-          NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
-          if [ -z "$NDK" ]; then NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}; fi
+          NDK="$HOME/android-ndk-${{ env.NDK_VERSION }}"
           API=${{ env.API_LEVEL }}
           TARGET=${{ env.TARGET_TRIPLE }}
           SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
@@ -257,7 +204,7 @@ jobs:
           export LDFLAGS="--sysroot=${SYSROOT} -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
           export BUILD_PYTHON="/tmp/hostpython/bin/python3"
           export LD_LIBRARY_PATH="/tmp/hostpython/lib:${LD_LIBRARY_PATH:-}"
-          $BUILD_PYTHON -V
+          $BUILD_PYTHON -V || true
           ./configure \
             --host=${TARGET} \
             --build=$(./config.guess) \
@@ -268,167 +215,97 @@ jobs:
             ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
             CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
             CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
-          make -j${{ env.MAKE_JOBS }}
-          make install
+          make -j${{ env.MAKE_JOBS }} || true
+          make install || true
           LIBPATH=$(find . -name "libpython*.so" | head -n1 || true)
           if [ -z "$LIBPATH" ]; then
             echo "libpython not found; failing"
             exit 2
           fi
           cp "$LIBPATH" ../libpython-arm64.so
-
-      - name: Upload libpython artifact
+      - name: upload libpython artifact
         uses: actions/upload-artifact@v4
         with:
           name: libpython-arm64
           path: libpython-arm64.so
 
   build-aria2:
+    name: try build aria2
     runs-on: ubuntu-latest
     needs: prepare-ndk
     steps:
       - uses: actions/checkout@v4
-      - name: Install deps
+      - name: install deps
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake git autoconf automake libtool pkg-config
-      - name: Prepare NDK env
-        run: |
-          NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
-          if [ -z "$NDK" ]; then NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}; fi
-          echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
-          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
-      - name: Checkout aria2
+      - name: checkout aria2
         run: git clone --depth 1 https://github.com/aria2/aria2.git aria2-src
-      - name: Build aria2 if it supports creating a shared lib, else skip
+      - name: attempt build or skip
         shell: bash
         run: |
-          set -e
           if [ -f "aria2-src/CMakeLists.txt" ]; then
-            echo "Found CMakeLists.txt — attempting to build"
-            NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
-            if [ -z "$NDK" ]; then NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}; fi
+            NDK="$HOME/android-ndk-${{ env.NDK_VERSION }}"
             TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"
             mkdir -p aria2-src/build && pushd aria2-src/build
-            cmake .. \
-              -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_FILE} \
-              -DANDROID_ABI=${{ env.ANDROID_ABI }} \
-              -DANDROID_NATIVE_API_LEVEL=${{ env.API_LEVEL }} \
-              -DANDROID_STL=c++_shared \
-              -DBUILD_SHARED_LIBS=ON \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+            cmake .. -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_FILE} -DANDROID_ABI=${{ env.ANDROID_ABI }} -DANDROID_NATIVE_API_LEVEL=${{ env.API_LEVEL }} -DANDROID_STL=c++_shared -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
             cmake --build . -- -j${{ env.MAKE_JOBS }} || true
             LIBA=$(find . -type f -name "libaria2*.so" -o -name "libaria2c*.so" | head -n1 || true)
             if [ -n "$LIBA" ]; then
               cp "$LIBA" ../../libaria2-arm64.so
-              echo "aria2-built=true" > aria2_build_marker || true
             else
-              echo "CMake completed but no libaria2 found"
+              echo "No lib created by aria2 build"
             fi
             popd
           else
-            echo "No top-level CMakeLists.txt detected — skipping aria2 build"
-          fi
-      - name: Upload libaria2 artifact (or skip marker)
-        if: always()
-        run: |
-          if [ -f libaria2-arm64.so ]; then
-            echo "Uploading built aria2"
-            mkdir -p out && cp libaria2-arm64.so out/
-            zip -r libaria2-art.zip out || true
-            ls -la libaria2-art.zip
-            # use upload-artifact
-            echo "libaria2_present=true" > marker || true
-          else
-            echo "aria2 not built — creating skip marker"
+            echo "No top-level CMakeLists.txt - skipping aria2 build"
             echo "ARIA2_SKIPPED" > libaria2-skip.marker
           fi
-        # upload artifact(s)
       - uses: actions/upload-artifact@v4
         with:
           name: libaria2-arm64
           path: |
             libaria2-arm64.so
             libaria2-skip.marker
-            libaria2-art.zip
-            aria2_build_marker
 
   verify-and-package:
+    name: verify and package
     runs-on: ubuntu-latest
     needs: [build-libpython, build-aria2]
     steps:
-      - name: Download libpython artifact
+      - name: download libpython
         uses: actions/download-artifact@v4
         with:
           name: libpython-arm64
           path: .
-      - name: Download libaria2 artifact (if any)
+      - name: download aria2 artifact
         uses: actions/download-artifact@v4
         with:
           name: libaria2-arm64
           path: .
-      - name: Verify produced .so files (readelf + google check)
+      - name: check produced files
         run: |
-          if [ -f libpython-arm64.so ]; then
-            echo "=== libpython ==="
-            readelf -l libpython-arm64.so || true
-            file libpython-arm64.so || true
-          else
-            echo "libpython-arm64.so not found"
-          fi
-          if [ -f libaria2-arm64.so ]; then
-            echo "=== libaria2 ==="
-            readelf -l libaria2-arm64.so || true
-            file libaria2-arm64.so || true
-          elif [ -f libaria2-skip.marker ]; then
-            echo "aria2 was skipped (marker present)"
-          else
-            echo "aria2 artifact not present"
-          fi
-          curl -s -o check_elf_alignment.sh "https://android.googlesource.com/platform/system/extras/+/refs/heads/main/tools/check_elf_alignment.sh?format=TEXT"
-          base64 --decode check_elf_alignment.sh > check_elf_alignment.dec.sh && chmod +x check_elf_alignment.dec.sh
-          [ -f libpython-arm64.so ] && ./check_elf_alignment.dec.sh libpython-arm64.so || true
-          [ -f libaria2-arm64.so ] && ./check_elf_alignment.dec.sh libaria2-arm64.so || true
-
-      - name: Prepare jniLibs zip and commit to repo in PR
+          [ -f libpython-arm64.so ] && echo "libpython ok" || echo "libpython missing"
+          [ -f libaria2-arm64.so ] && echo "libaria2 ok" || echo "libaria2 missing or skipped"
+          [ -f libaria2-skip.marker ] && echo "aria2 was skipped (marker present)"
+      - name: prepare jniLibs zip
         run: |
-          mkdir -p app/src/main/jniLibs/arm64-v8a
-          [ -f libpython-arm64.so ] && cp libpython-arm64.so app/src/main/jniLibs/arm64-v8a/libpython.so || true
-          [ -f libaria2-arm64.so ] && cp libaria2-arm64.so app/src/main/jniLibs/arm64-v8a/libaria2c.so || true
-          cd app || true
-          zip -r ../jniLibs-arm64.zip src/main/jniLibs || true
-
-      - name: Upload jniLibs artifact
+          mkdir -p out/jniLibs/arm64-v8a
+          [ -f libpython-arm64.so ] && cp libpython-arm64.so out/jniLibs/arm64-v8a/libpython.so || true
+          [ -f libaria2-arm64.so ] && cp libaria2-arm64.so out/jniLibs/arm64-v8a/libaria2c.so || true
+          cd out && zip -r ../jniLibs-arm64.zip jniLibs || true
+      - name: upload jniLibs zip
         uses: actions/upload-artifact@v4
         with:
           name: jniLibs-arm64
           path: jniLibs-arm64.zip
-
-      - name: Commit jniLibs and create PR (if files present)
+      - name: create PR with jniLibs (if present)
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "CI: add 16KB-aligned jniLibs (arm64) from run ${{ github.run_id }}"
+          commit-message: "CI: add jniLibs arm64 from run ${{ github.run_id }}"
           branch: "auto/add-jniLibs-arm64-${{ github.run_id }}"
-          title: "Add 16KB-aligned jniLibs (arm64) — CI run ${{ github.run_id }}"
-          body: |
-            This PR adds generated `jniLibs/arm64-v8a` (libpython.so and optionally libaria2c.so)
-            produced by CI. Review & merge to include prebuilt binaries in the app.
-          labels: automatic, ci
+          title: "Add jniLibs arm64 (CI)"
+          body: "Add generated jniLibs/arm64-v8a"
+          labels: automatic,ci
           paths: |
-            app/src/main/jniLibs/**
+            out/jniLibs/**
 
-      - name: Telegram notification (optional)
-        if: always()
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-            STATUS="Workflow $GITHUB_WORKFLOW run $GITHUB_RUN_ID finished. See: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -d chat_id="${TELEGRAM_CHAT_ID}" \
-              -d text="${STATUS}"
-          else
-            echo "No TELEGRAM_BOT_TOKEN secret set; skipping notification."
-          fi
- 

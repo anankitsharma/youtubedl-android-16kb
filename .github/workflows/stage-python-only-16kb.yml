@@ -69,6 +69,11 @@ jobs:
           pkg=termux-packages/packages/python/build.sh
           if [ -f "$pkg" ]; then
             echo 'TERMUX_PKG_EXTRA_LDFLAGS+=" -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 "' | tee -a "$pkg"
+            # Ensure Python links shared libs with the extra LDFLAGS by exporting in recipe
+            echo 'export LDFLAGS="$LDFLAGS $TERMUX_PKG_EXTRA_LDFLAGS"' | tee -a "$pkg"
+            echo 'export LDSHARED="$CC -shared $TERMUX_PKG_EXTRA_LDFLAGS"' | tee -a "$pkg"
+            echo 'export LDCXXSHARED="$CXX -shared $TERMUX_PKG_EXTRA_LDFLAGS"' | tee -a "$pkg"
+            echo 'export LINKFORSHARED="$TERMUX_PKG_EXTRA_LDFLAGS"' | tee -a "$pkg"
           fi
 
       - name: Build Python
@@ -86,7 +91,9 @@ jobs:
           export LDFLAGS="${EXTRA_LDFLAGS} ${LDFLAGS:-} ${EXTRA_LDFLAGS}"
           export CFLAGS="${CFLAGS:-} -fPIC"
           export CXXFLAGS="${CXXFLAGS:-} -fPIC"
-          ./scripts/run-docker.sh env TERMUX_ARCH=${TERMUX_ARCH} TERMUX_PREFIX=${TERMUX_PREFIX} TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} LDFLAGS="${LDFLAGS}" CFLAGS="${CFLAGS}" CXXFLAGS="${CXXFLAGS}" ./build-package.sh -f python
+          export LDSHARED="$CC -shared ${EXTRA_LDFLAGS}"
+          export LDCXXSHARED="$CXX -shared ${EXTRA_LDFLAGS}"
+          ./scripts/run-docker.sh env TERMUX_ARCH=${TERMUX_ARCH} TERMUX_PREFIX=${TERMUX_PREFIX} TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} LDFLAGS="${LDFLAGS}" CFLAGS="${CFLAGS}" CXXFLAGS="${CXXFLAGS}" LDSHARED="${LDSHARED}" LDCXXSHARED="${LDCXXSHARED}" ./build-package.sh -f python
           EOS
           chmod +x build-python.sh
           ./build-python.sh

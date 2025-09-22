@@ -362,8 +362,8 @@ jobs:
             produced by CI (16KB PT_LOAD aligned). The artifacts were built using Android NDK r28b.
             Please review and merge to include these prebuilt binaries in the app.
           labels: automatic, ci
-
-      - name: Optional: create PR with jniLibs changes
+          
+      - name: Optional create PR with jniLibs changes
         if: always()
         run: |
           echo "PR creation step is optional; see workflow for configured create-pull-request action."

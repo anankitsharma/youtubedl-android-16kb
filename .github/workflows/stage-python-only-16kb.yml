@@ -94,9 +94,6 @@ jobs:
             LDFLAGS="${LDFLAGS}" \
             CFLAGS="${CFLAGS}" \
             CXXFLAGS="${CXXFLAGS}" \
-            LDSHARED="\$CC -shared ${EXTRA_LDFLAGS}" \
-            LDCXXSHARED="\$CXX -shared ${EXTRA_LDFLAGS}" \
-            LINKFORSHARED="${EXTRA_LDFLAGS}" \
             ./build-package.sh -f python
           EOS
           chmod +x build-python.sh

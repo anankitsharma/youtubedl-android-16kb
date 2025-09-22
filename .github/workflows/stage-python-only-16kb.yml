@@ -1,112 +1,204 @@
-name: build-libpython-arm64-16kb
+name: build-16kb-arm64
 
+# Manual run from Actions -> Run workflow
 on:
   workflow_dispatch:
 
 jobs:
-  build-libpython-arm64:
+  build-and-verify:
     runs-on: ubuntu-latest
     env:
-      PYTHON_VERSION: "3.12.0"   # change if you need another Python
-      NDK_VERSION: "r28b"        # use r28 or newer
-      API_LEVEL: "24"            # android API level for toolchain
-      TARGET: "aarch64-linux-android"
-      ARCH: "aarch64"
+      PYTHON_VERSION: "3.12.0"    # change if you want another Python
+      NDK_VERSION: "r28b"         # NDK r28+ recommended
+      API_LEVEL: "24"             # Android API level for toolchain
+      TARGET_TRIPLE: "aarch64-linux-android"
+      ANDROID_ABI: "arm64-v8a"
+      MAKE_JOBS: "2"              # change to 4 or $(nproc) if runner can handle it
 
     steps:
-    - name: Checkout
+    - name: Checkout repo
       uses: actions/checkout@v4
 
-    - name: Install deps
-      run: sudo apt-get update && sudo apt-get install -y build-essential wget curl unzip pkg-config zlib1g-dev
+    - name: Install system build deps
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential wget curl unzip pkg-config cmake automake autoconf libtool git
 
     - name: Download Android NDK
       run: |
-        wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip -O /tmp/ndk.zip
+        wget -q "https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip" -O /tmp/ndk.zip
         unzip -q /tmp/ndk.zip -d $HOME
         echo "ANDROID_NDK_HOME=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
         echo "NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+        ls -l $HOME/android-ndk-${{ env.NDK_VERSION }} | sed -n '1,120p'
 
-    - name: Download CPython source
-      run: |
-        PY=${{ env.PYTHON_VERSION }}
-        wget -q https://www.python.org/ftp/python/${PY}/Python-${PY}.tgz -O /tmp/Python-${PY}.tgz
-        tar xf /tmp/Python-${PY}.tgz -C $PWD
-        ls -l Python-${PY}
-
-    - name: Prepare toolchain env
-      shell: bash
-      run: |
-        export NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
-        export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
-        export API=${{ env.API_LEVEL }}
-        export CC=${{ env.TARGET }}${API}-clang
-        export CXX=${{ env.TARGET }}${API}-clang++
-        export AR=${{ env.TARGET }}-ar
-        export RANLIB=${{ env.TARGET }}-ranlib
-        export STRIP=${{ env.TARGET }}-strip
-        echo "CC=$CC" >> $GITHUB_ENV
-        echo "CXX=$CXX" >> $GITHUB_ENV
-        echo "AR=$AR" >> $GITHUB_ENV
-        echo "RANLIB=$RANLIB" >> $GITHUB_ENV
-        echo "STRIP=$STRIP" >> $GITHUB_ENV
-
-    - name: Configure and build CPython (arm64 shared lib)
+    ############################################################################
+    # 1) Build a native host Python (needed for cross-compiling CPython)
+    ############################################################################
+    - name: Build host Python (native)
       shell: bash
       run: |
         set -euo pipefail
         PY=${{ env.PYTHON_VERSION }}
+        # download source
+        wget -q "https://www.python.org/ftp/python/${PY}/Python-${PY}.tgz" -O /tmp/Python-${PY}.tgz
+        tar xf /tmp/Python-${PY}.tgz -C /tmp
+        pushd /tmp/Python-${PY}
+        ./configure --prefix=/tmp/hostpython --enable-optimizations --without-ensurepip
+        make -j${{ env.MAKE_JOBS }}
+        make install
+        /tmp/hostpython/bin/python3 -V
+        popd
+        echo "HOST_PYTHON=/tmp/hostpython/bin/python3" >> $GITHUB_ENV
+
+    ############################################################################
+    # 2) Cross-compile CPython to produce libpython*.so (arm64) with 16KB flags
+    ############################################################################
+    - name: Cross-compile CPython (libpython.so) for arm64 (16KB)
+      shell: bash
+      run: |
+        set -euo pipefail
+        PY=${{ env.PYTHON_VERSION }}
+        NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
+        API=${{ env.API_LEVEL }}
+        TARGET=${{ env.TARGET_TRIPLE }}
+        SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+        export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+
+        # Prepare source dir
+        cp -r /tmp/Python-${PY} .
         cd Python-${PY}
 
-        # important flags: produce a shared libpython and set 16KB page size for the linker
-        export SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-        export CFLAGS="--sysroot=$SYSROOT -D__ANDROID_API__=${{ env.API_LEVEL }}"
-        export LDFLAGS="--sysroot=$SYSROOT -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+        # Toolchain compiler names (clang driver)
+        export CC=${TARGET}${API}-clang
+        export CXX=${TARGET}${API}-clang++
+        export AR=${TARGET}-ar
+        export RANLIB=${TARGET}-ranlib
+        export STRIP=${TARGET}-strip
 
-        # configure for cross-compile
+        # Important: ensure we pass the 16KB page-size linker flags
+        export CFLAGS="--sysroot=${SYSROOT} -D__ANDROID_API__=${API}"
+        export LDFLAGS="--sysroot=${SYSROOT} -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+
+        # Configure cross build and tell configure where host python is (--with-build-python)
         ./configure \
-          --host=${{ env.TARGET }} \
+          --host=${TARGET} \
           --build=$(./config.guess) \
-          --prefix=$PWD/build \
+          --prefix=$PWD/build-arm64 \
           --enable-shared \
+          --with-build-python=/tmp/hostpython/bin/python3 \
           ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
           CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
           CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
 
-        make -j$(nproc) \
-          V=1
-
+        # Build (limit jobs if runner memory is small)
+        make -j${{ env.MAKE_JOBS }}
         make install
 
-        # libpython should be under build/lib or build/lib/libpython*.so
-        find $PWD -name "libpython*.so" -print || true
-        cp $(find $PWD -name "libpython*.so" | head -n1) ../libpython-arm64.so || true
-
-    - name: Verify ELF alignment (readelf)
-      shell: bash
-      run: |
-        set -e
-        echo "=== llvm-readelf PT_LOAD entries ==="
-        which llvm-readelf || true
-        # use readelf (from binutils) or llvm-readelf from NDK if present
-        if command -v llvm-readelf >/dev/null 2>&1; then
-          llvm-readelf -l ../libpython-arm64.so || true
-        else
-          readelf -l ../libpython-arm64.so || true
+        # Find produced shared library
+        LIBPATH=$(find $PWD -name "libpython*.so" | head -n1 || true)
+        if [ -z "$LIBPATH" ]; then
+          echo "ERROR: libpython not found. Listing build tree for debugging:"
+          ls -la
+          find . -maxdepth 4 -type f -name "*.so" -print || true
+          exit 2
         fi
-        file ../libpython-arm64.so
+        echo "Built libpython: $LIBPATH"
+        cp "$LIBPATH" ../libpython-arm64.so
         ls -l ../libpython-arm64.so
 
-    - name: Download Google alignment checker script
+    ############################################################################
+    # 3) Build aria2 (libaria2c.so) using CMake + Android toolchain with 16KB flags
+    #    (aria2 uses CMake; adjust if you have a custom source or fork)
+    ############################################################################
+    - name: Build aria2 (libaria2c.so) for arm64 (16KB)
       shell: bash
       run: |
+        set -euo pipefail
+        NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
+        API=${{ env.API_LEVEL }}
+        ABI=${{ env.ANDROID_ABI }}
+        SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+        TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"
+
+        # clone aria2 (official repo)
+        git clone --depth 1 https://github.com/aria2/aria2.git aria2-src
+        mkdir -p aria2-src/build && pushd aria2-src/build
+
+        # CMake options: build shared library only, pass linker flags for 16KB
+        cmake .. \
+          -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_FILE} \
+          -DANDROID_ABI=${ABI} \
+          -DANDROID_NATIVE_API_LEVEL=${API} \
+          -DANDROID_STL=c++_shared \
+          -DBUILD_SHARED_LIBS=ON \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_C_FLAGS="--sysroot=${SYSROOT}" \
+          -DCMAKE_CXX_FLAGS="--sysroot=${SYSROOT}" \
+          -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+
+        cmake --build . -- -j${{ env.MAKE_JOBS }}
+
+        # Search for libaria2 or libaria2c (names may differ per build)
+        LIBA=$(find . -type f -name "libaria2*.so" -o -name "libaria2c*.so" | head -n1 || true)
+        if [ -z "$LIBA" ]; then
+          echo "ERROR: libaria2 not found. Show build dir listing for diagnosis:"
+          ls -la
+          find . -maxdepth 4 -type f -name "*.so" -print || true
+          exit 3
+        fi
+        echo "Built aria2 lib: $LIBA"
+        cp "$LIBA" ../../libaria2-arm64.so
+        popd
+        ls -l libaria2-arm64.so || true
+
+    ############################################################################
+    # 4) Verify ELF PT_LOAD alignment for each produced .so (readelf + Google script)
+    ############################################################################
+    - name: Verify produced .so files (readelf + Google alignment checker)
+      shell: bash
+      run: |
+        set -euo pipefail
+        # show readelf PT_LOAD entries (should show alignment 0x4000 ideally)
+        echo "=== libpython ==="
+        if command -v llvm-readelf >/dev/null 2>&1; then
+          llvm-readelf -l libpython-arm64.so || true
+        else
+          readelf -l libpython-arm64.so || true
+        fi
+        file libpython-arm64.so || true
+        echo "=== libaria2 ==="
+        if command -v llvm-readelf >/dev/null 2>&1; then
+          llvm-readelf -l libaria2-arm64.so || true
+        else
+          readelf -l libaria2-arm64.so || true
+        fi
+        file libaria2-arm64.so || true
+
+        # Download Google's checker script and run it (script expects an APK but accepts files)
         curl -s -o check_elf_alignment.sh "https://android.googlesource.com/platform/system/extras/+/refs/heads/main/tools/check_elf_alignment.sh?format=TEXT"
         base64 --decode check_elf_alignment.sh > check_elf_alignment.dec.sh
         chmod +x check_elf_alignment.dec.sh
-        ./check_elf_alignment.dec.sh ../libpython-arm64.so || true
 
-    - name: Upload libpython artifact
+        echo "Running Google alignment checker on libpython-arm64.so"
+        ./check_elf_alignment.dec.sh libpython-arm64.so || true
+        echo "Running Google alignment checker on libaria2-arm64.so"
+        ./check_elf_alignment.dec.sh libaria2-arm64.so || true
+
+    ############################################################################
+    # 5) Package the jniLibs folder and upload as artifact for easy download
+    ############################################################################
+    - name: Prepare jniLibs folder and zip it
+      run: |
+        mkdir -p out/jniLibs/arm64-v8a
+        # rename copies to the expected names (adjust if your app expects different names)
+        cp libpython-arm64.so out/jniLibs/arm64-v8a/libpython.so
+        cp libaria2-arm64.so out/jniLibs/arm64-v8a/libaria2c.so || cp libaria2-arm64.so out/jniLibs/arm64-v8a/libaria2.so || true
+        ls -la out/jniLibs/arm64-v8a
+        cd out && zip -r ../jniLibs-arm64.zip jniLibs
+
+    - name: Upload jniLibs artifact
       uses: actions/upload-artifact@v4
       with:
-        name: libpython-arm64
-        path: ../libpython-arm64.so
+        name: jniLibs-arm64
+        path: jniLibs-arm64.zip

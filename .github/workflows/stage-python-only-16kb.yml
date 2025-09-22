@@ -15,53 +15,39 @@ jobs:
   prepare-ndk:
     runs-on: ubuntu-latest
     outputs:
-      ndk-path: ${{ steps.set-ndk.outputs.ndk_path }}
+      ndk_path: ${{ steps.set-ndk.outputs.ndk_path }}
     steps:
       - name: Ensure tools available
         run: sudo apt-get update && sudo apt-get install -y wget unzip
 
-      - name: Cache NDK (runner.temp)
+      - name: Cache / restore NDK at $HOME/android-ndk-${{ env.NDK_VERSION }}
         id: ndk-cache
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}
+          path: $HOME/android-ndk-${{ env.NDK_VERSION }}
           key: ndk-${{ env.NDK_VERSION }}-v1
           restore-keys: |
             ndk-${{ env.NDK_VERSION }}-
 
-      - name: If cache hit, copy NDK to HOME
-        if: steps.ndk-cache.outputs.cache-hit == 'true'
-        run: |
-          echo "Cache hit - copying cached NDK to \$HOME"
-          CACHE_DIR="${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}"
-          if [ -d "$CACHE_DIR" ]; then
-            rm -rf "$HOME/android-ndk-${{ env.NDK_VERSION }}" || true
-            cp -r "$CACHE_DIR" "$HOME/"
-          fi
-          # also record to GITHUB_OUTPUT so downstream jobs can read the output reliably
-          echo "ndk_path=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_OUTPUT
-
       - name: Download NDK if cache miss
         if: steps.ndk-cache.outputs.cache-hit != 'true'
         run: |
-          echo "Cache miss - downloading NDK"
+          echo "Cache miss - downloading NDK into $HOME"
           NDK_ZIP="/tmp/android-ndk-${{ env.NDK_VERSION }}-linux.zip"
           wget -q "https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip" -O "$NDK_ZIP"
           unzip -q "$NDK_ZIP" -d $HOME
-          mkdir -p "${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}"
-          cp -r "$HOME/android-ndk-${{ env.NDK_VERSION }}" "${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}"
-          echo "ndk_path=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_OUTPUT
+          # action/cache will capture $HOME/android-ndk-... at the end of the job automatically
 
-      - name: Show NDK location
+      - name: Show NDK location and set job output
         id: set-ndk
         run: |
-          # final check - always set ndk_path output here (ensures job output exists)
-          if [ -d "$HOME/android-ndk-${{ env.NDK_VERSION }}" ]; then
-            echo "ndk_path=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_OUTPUT
-            echo "NDK found at $HOME/android-ndk-${{ env.NDK_VERSION }}"
-            ls -la "$HOME/android-ndk-${{ env.NDK_VERSION }}" | sed -n '1,120p'
+          NDKDIR="$HOME/android-ndk-${{ env.NDK_VERSION }}"
+          if [ -d "$NDKDIR" ]; then
+            echo "ndk_path=$NDKDIR" >> $GITHUB_OUTPUT
+            echo "NDK present at: $NDKDIR"
+            ls -la "$NDKDIR" | sed -n '1,120p'
           else
-            echo "ERROR: NDK not found after cache/download. Directory listing:"
+            echo "ERROR: NDK not found at expected path: $NDKDIR"
             ls -la $HOME || true
             exit 2
           fi
@@ -161,45 +147,27 @@ jobs:
             echo "ERROR: /tmp/hostpython/bin/python3 not found after cache/artifact restore"
             exit 2
           fi
-      - name: Prepare environment and ensure NDK present
+      - name: Prepare environment and ensure NDK present (robust)
         run: |
-          # Try job output from prepare-ndk first, then fallback to $HOME, then runner.temp cache
+          # Prefer job output from prepare-ndk, then fallback to $HOME path (which we also cache).
           NDK="${{ needs.prepare-ndk.outputs.ndk_path }}"
+          echo "NDK from job output: '$NDK'"
 
-          echo "Initial NDK from job output: '$NDK'"
-
-          # If job output empty or not a dir, try default $HOME path
           if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
             if [ -d "$HOME/android-ndk-${{ env.NDK_VERSION }}" ]; then
               NDK="$HOME/android-ndk-${{ env.NDK_VERSION }}"
-              echo "Falling back to \$HOME path: $NDK"
+              echo "Falling back to $NDK"
             fi
           fi
 
-          # If still missing, check runner.temp cache (this is where prepare-ndk writes cached copy)
           if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
-            CACHE_NDK="${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}"
-            if [ -d "$CACHE_NDK" ]; then
-              echo "Found NDK in runner.temp cache: $CACHE_NDK"
-              # copy into $HOME so Android toolchain path is stable in this job
-              rm -rf "$HOME/android-ndk-${{ env.NDK_VERSION }}" || true
-              cp -r "$CACHE_NDK" "$HOME/"
-              NDK="$HOME/android-ndk-${{ env.NDK_VERSION }}"
-              echo "Copied cached NDK -> $NDK"
-            fi
-          fi
-
-          # Final check: fail with helpful debugging if not found
-          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
-            echo "ERROR: NDK not found after all fallbacks."
-            echo "Listing $HOME:"
+            echo "NDK not found in job output or $HOME. Listing $HOME for diagnosis:"
             ls -la $HOME || true
-            echo "Listing runner.temp:"
-            ls -la "${{ runner.temp }}" || true
+            echo "Listing cache keys and approximate locations is not available; failing with code 5"
             exit 5
           fi
 
-          echo "NDK used: $NDK"
+          echo "Using NDK: $NDK"
           echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
           export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
       - name: Download CPython sources (copy)
@@ -215,7 +183,6 @@ jobs:
         run: |
           set -euo pipefail
           PY=${{ env.PYTHON_VERSION }}
-          # use NDK from job output if available
           NDK="${{ needs.prepare-ndk.outputs.ndk_path }}"
           if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
             NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
@@ -291,7 +258,7 @@ jobs:
           export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
       - name: Checkout aria2
         run: git clone --depth 1 https://github.com/aria2/aria2.git aria2-src
-      - name: Decide build method and build or skip
+      - name: Decide build method and build or skip (writes clear marker if skipped)
         shell: bash
         run: |
           set -e
@@ -319,17 +286,18 @@ jobs:
               echo "Found built library at: $LIBA"
               cp "$LIBA" ../../libaria2-arm64.so
             else
-              echo "CMake completed but no libaria2 shared object found in build directories."
-              echo "Listing built tree for diagnosis:"
-              find . -maxdepth 4 -type f -iname "*.so" -o -iname "*.a" -o -iname "aria2*" -print || true
-              echo "Creating explicit skip marker: libaria2-skip.marker"
-              echo "ARIA2_SKIPPED" > libaria2-skip.marker
+              echo "CMake completed but no libaria2 shared object found in build directories." > libaria2-skip.marker
+              echo "Build tree listing (diagnostic):" >> libaria2-skip.marker
+              find . -maxdepth 4 -type f -iname "*.so" -o -iname "*.a" -o -iname "aria2*" -print >> libaria2-skip.marker || true
+              echo "" >> libaria2-skip.marker
+              echo "If you require a libaria2.so, either provide a prebuilt .so, or enable additional dependencies (zlib/openssl) and use a custom build script." >> libaria2-skip.marker
+              echo "ARIA2_SKIPPED" >> libaria2-skip.marker
             fi
             popd
           else
-            echo "No top-level CMakeLists.txt detected in aria2-src. Skipping automated aria2 build."
-            echo "ARIA2_SKIPPED" > libaria2-skip.marker
-            ls -la
+            echo "No top-level CMakeLists.txt detected in aria2-src. Creating skip marker." > libaria2-skip.marker
+            echo "ARIA2_SKIPPED" >> libaria2-skip.marker
+            ls -la aria2-src >> libaria2-skip.marker || true
           fi
       - name: Upload libaria2 artifact (if present)
         uses: actions/upload-artifact@v4
@@ -375,7 +343,8 @@ jobs:
             fi
             file libaria2-arm64.so || true
           elif [ -f libaria2-skip.marker ]; then
-            echo "aria2 build was intentionally skipped (no CMakeLists in upstream repo or no shared lib produced)."
+            echo "aria2 build was intentionally skipped; marker content:"
+            sed -n '1,200p' libaria2-skip.marker || true
           else
             echo "aria2 artifact not present; you can provide a prebuilt libaria2 and re-run."
           fi
@@ -399,7 +368,6 @@ jobs:
           name: jniLibs-arm64
           path: jniLibs-arm64.zip
 
-      # --- Auto commit & open PR: add generated files into a new branch and open PR ---
       - name: Checkout repo to commit jniLibs
         uses: actions/checkout@v4
         with:

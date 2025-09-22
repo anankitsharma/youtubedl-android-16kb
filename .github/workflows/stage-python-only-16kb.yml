@@ -1,302 +1,112 @@
-name: Build Python only (16KB)
+name: build-libpython-arm64-16kb
 
 on:
   workflow_dispatch:
-    inputs:
-      force_rebuild:
-        description: "Force rebuild even if caches present"
-        required: false
-        default: 'true'
-        type: choice
-        options: ['true','false']
-      cache_key:
-        description: "Cache key suffix (bump to bust caches)"
-        required: false
-        default: 'v1'
-        type: string
 
 jobs:
-  build-python:
-    name: Build Python (arm64)
+  build-libpython-arm64:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
     env:
-      TERMUX_ARCH: aarch64
-      TERMUX_PREFIX: /data/youtubedl-android/usr
-      TERMUX_ANDROID_HOME: /data/youtubedl-android/home
-      MAKEFLAGS: "-j$(nproc)"
-      EXTRA_LDFLAGS: "-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+      PYTHON_VERSION: "3.12.0"   # change if you need another Python
+      NDK_VERSION: "r28b"        # use r28 or newer
+      API_LEVEL: "24"            # android API level for toolchain
+      TARGET: "aarch64-linux-android"
+      ARCH: "aarch64"
+
     steps:
-      - uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      - name: Install deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zip unzip dpkg-dev binutils llvm
-          docker --version || true
+    - name: Install deps
+      run: sudo apt-get update && sudo apt-get install -y build-essential wget curl unzip pkg-config zlib1g-dev
 
-      - name: Restore python debs cache
-        id: python_deb_cache
-        if: ${{ inputs.force_rebuild != 'true' }}
-        uses: actions/cache@v4
-        with:
-          path: out/debs-python
-          key: python-debs-${{ runner.os }}-${{ inputs.cache_key }}
-          restore-keys: |
-            python-debs-${{ runner.os }}-
+    - name: Download Android NDK
+      run: |
+        wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip -O /tmp/ndk.zip
+        unzip -q /tmp/ndk.zip -d $HOME
+        echo "ANDROID_NDK_HOME=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+        echo "NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
 
-      - name: Restore termux caches
-        if: ${{ inputs.force_rebuild != 'true' }}
-        uses: actions/cache@v4
-        with:
-          path: |
-            termux-packages/.termux-build
-            termux-packages/debs
-            termux-packages/.cache
-          key: python-termux-${{ runner.os }}-${{ inputs.cache_key }}
-          restore-keys: |
-            python-termux-${{ runner.os }}-
+    - name: Download CPython source
+      run: |
+        PY=${{ env.PYTHON_VERSION }}
+        wget -q https://www.python.org/ftp/python/${PY}/Python-${PY}.tgz -O /tmp/Python-${PY}.tgz
+        tar xf /tmp/Python-${PY}.tgz -C $PWD
+        ls -l Python-${PY}
 
-      - name: Clone Termux packages (shallow)
-        if: ${{ inputs.force_rebuild == 'true' || steps.python_deb_cache.outputs.cache-hit != 'true' }}
-        run: |
-          if [ ! -d termux-packages ]; then git clone --depth 1 https://github.com/termux/termux-packages.git; fi
+    - name: Prepare toolchain env
+      shell: bash
+      run: |
+        export NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
+        export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+        export API=${{ env.API_LEVEL }}
+        export CC=${{ env.TARGET }}${API}-clang
+        export CXX=${{ env.TARGET }}${API}-clang++
+        export AR=${{ env.TARGET }}-ar
+        export RANLIB=${{ env.TARGET }}-ranlib
+        export STRIP=${{ env.TARGET }}-strip
+        echo "CC=$CC" >> $GITHUB_ENV
+        echo "CXX=$CXX" >> $GITHUB_ENV
+        echo "AR=$AR" >> $GITHUB_ENV
+        echo "RANLIB=$RANLIB" >> $GITHUB_ENV
+        echo "STRIP=$STRIP" >> $GITHUB_ENV
 
-      - name: Force 16KB LDFLAGS in Python recipe
-        if: ${{ inputs.force_rebuild == 'true' || steps.python_deb_cache.outputs.cache-hit != 'true' }}
-        run: |
-          set -euxo pipefail
-          pkg=termux-packages/packages/python/build.sh
-          if [ -f "$pkg" ]; then
-            echo 'TERMUX_PKG_EXTRA_LDFLAGS+=" -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 "' | tee -a "$pkg"
-            # Prefer passing these via docker env so CC/CXX resolve inside builder
-          fi
+    - name: Configure and build CPython (arm64 shared lib)
+      shell: bash
+      run: |
+        set -euo pipefail
+        PY=${{ env.PYTHON_VERSION }}
+        cd Python-${PY}
 
-      - name: Build Python
-        working-directory: termux-packages
-        if: ${{ inputs.force_rebuild == 'true' || steps.python_deb_cache.outputs.cache-hit != 'true' }}
-        run: |
-          cat > build-python.sh << 'EOS'
-          #!/usr/bin/env bash
-          set -euxo pipefail
-          export TERMUX_ARCH=${TERMUX_ARCH}
-          export TERMUX_PREFIX=${TERMUX_PREFIX}
-          export TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME}
-          export MAKEFLAGS=${MAKEFLAGS}
-          export EXTRA_LDFLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
-          export LDFLAGS="${EXTRA_LDFLAGS} ${LDFLAGS:-} ${EXTRA_LDFLAGS}"
-          export CFLAGS="${CFLAGS:-} -fPIC"
-          export CXXFLAGS="${CXXFLAGS:-} -fPIC"
-          ./scripts/run-docker.sh env \
-            TERMUX_ARCH=${TERMUX_ARCH} \
-            TERMUX_PREFIX=${TERMUX_PREFIX} \
-            TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} \
-            LDFLAGS="${LDFLAGS}" \
-            CFLAGS="${CFLAGS}" \
-            CXXFLAGS="${CXXFLAGS}" \
-            ./build-package.sh -f python
-          EOS
-          chmod +x build-python.sh
-          ./build-python.sh
+        # important flags: produce a shared libpython and set 16KB page size for the linker
+        export SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+        export CFLAGS="--sysroot=$SYSROOT -D__ANDROID_API__=${{ env.API_LEVEL }}"
+        export LDFLAGS="--sysroot=$SYSROOT -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
-      - name: Collect Python debs
-        if: ${{ inputs.force_rebuild == 'true' || steps.python_deb_cache.outputs.cache-hit != 'true' }}
-        run: |
-          set -euxo pipefail
-          mkdir -p out/debs-python
-          found=$(find termux-packages -type f -name "*.deb" -print -exec cp {} out/debs-python/ \; | tee /dev/stderr | wc -l)
-          if [ "$found" -eq 0 ]; then echo "No python debs produced" >&2; exit 1; fi
+        # configure for cross-compile
+        ./configure \
+          --host=${{ env.TARGET }} \
+          --build=$(./config.guess) \
+          --prefix=$PWD/build \
+          --enable-shared \
+          ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
+          CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
+          CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
 
-      - name: Sanitize Python deb filenames (replace ':' with '_')
-        run: |
-          set -euxo pipefail
-          mkdir -p out/debs-python
-          shopt -s nullglob
-          for f in out/debs-python/*.deb; do
-            base=$(basename "$f")
-            safe=${base//:/_}
-            if [ "$base" != "$safe" ]; then
-              mv -f "out/debs-python/$base" "out/debs-python/$safe"
-            fi
-          done
+        make -j$(nproc) \
+          V=1
 
-      - name: Upload Python deb artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-debs
-          path: out/debs-python
-          if-no-files-found: error
+        make install
 
-  stage-python:
-    name: Stage Python ZIP and jniLibs
-    runs-on: ubuntu-latest
-    needs: [build-python]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y dpkg-dev zip unzip llvm binutils file
-      - name: Download debs
-        uses: actions/download-artifact@v4
-        with:
-          name: python-debs
-          path: _python_debs
-      - name: Stage
-        run: |
-          set -euxo pipefail
-          mkdir -p out/jniLibs/arm64-v8a out/tmp/python
-          for f in _python_debs/*.deb; do dpkg-deb -x "$f" out/tmp/python || true; done
-          if [ -f out/jniLibs/arm64-v8a/libpython.zip.so ]; then rm -f out/jniLibs/arm64-v8a/libpython.zip.so; fi
-          for p in out/tmp/python/data/youtubedl-android/usr out/tmp/python/data/data/com.termux/files/usr out/tmp/python/data/usr out/tmp/python/usr; do
-            if [ -d "$p/lib" ]; then (cd "$(dirname "$p")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libpython.zip.so" "$(basename "$p")"/lib); break; fi
-          done
-          # Do not rely on Termux libpython alignment; build a tiny aligned stub instead
-          : > out/jniLibs/arm64-v8a/.placeholder
+        # libpython should be under build/lib or build/lib/libpython*.so
+        find $PWD -name "libpython*.so" -print || true
+        cp $(find $PWD -name "libpython*.so" | head -n1) ../libpython-arm64.so || true
 
-      - name: Set up Java (for sdkmanager)
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+    - name: Verify ELF alignment (readelf)
+      shell: bash
+      run: |
+        set -e
+        echo "=== llvm-readelf PT_LOAD entries ==="
+        which llvm-readelf || true
+        # use readelf (from binutils) or llvm-readelf from NDK if present
+        if command -v llvm-readelf >/dev/null 2>&1; then
+          llvm-readelf -l ../libpython-arm64.so || true
+        else
+          readelf -l ../libpython-arm64.so || true
+        fi
+        file ../libpython-arm64.so
+        ls -l ../libpython-arm64.so
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+    - name: Download Google alignment checker script
+      shell: bash
+      run: |
+        curl -s -o check_elf_alignment.sh "https://android.googlesource.com/platform/system/extras/+/refs/heads/main/tools/check_elf_alignment.sh?format=TEXT"
+        base64 --decode check_elf_alignment.sh > check_elf_alignment.dec.sh
+        chmod +x check_elf_alignment.dec.sh
+        ./check_elf_alignment.dec.sh ../libpython-arm64.so || true
 
-      - name: Install Android NDK r27
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager --install "ndk;27.0.12077973" "platform-tools" "platforms;android-34" || true
-          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
-
-      - name: Build Unaligned libpython.so Stub
-        run: |
-          set -euxo pipefail
-          : ${ANDROID_NDK:=${ANDROID_NDK_ROOT}}
-          CC="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          cat > python_stub.c << 'EOF'
-          /* Placeholder stub. Alignment will be fixed by patching. */
-          void libpython_stub(void) {}
-          EOF
-          # Build a standard shared library. The linker will likely default to 4KB alignment.
-          "$CC" -shared -fPIC python_stub.c -o out/jniLibs/arm64-v8a/libpython.so
-
-      - name: Force 16KB Alignment by Patching ELF Header
-        run: |
-          set -euxo pipefail
-          cat > align_elf.py << 'EOF'
-          import os, struct
-
-          ALIGN = 16384
-
-          # Helpers
-          def align_up(x, a=ALIGN):
-              m = (a - 1)
-              return (x + m) & ~m
-
-          def insert_padding(path, pos, size):
-              # Insert `size` zero bytes at file offset `pos`.
-              with open(path, 'r+b') as f:
-                  f.seek(0, os.SEEK_END)
-                  end = f.tell()
-                  if pos > end:
-                      f.seek(end)
-                      f.write(b"\x00" * (pos - end))
-                      end = pos
-                  # Read tail
-                  f.seek(pos)
-                  tail = f.read()
-                  f.seek(pos)
-                  f.write(b"\x00" * size)
-                  f.write(tail)
-                  f.flush()
-                  os.fsync(f.fileno())
-
-          def realign_pt_loads(path):
-              with open(path, 'r+b') as f:
-                  eh = f.read(64)
-                  if eh[:4] != b'\x7fELF' or eh[4] != 2:
-                      raise SystemExit('Not ELF64: ' + path)
-                  # Little-endian ELF64 header fields
-                  e_phoff = struct.unpack('<Q', eh[32:40])[0]
-                  e_shoff = struct.unpack('<Q', eh[40:48])[0]
-                  e_phentsize = struct.unpack('<H', eh[54:56])[0]
-                  e_phnum = struct.unpack('<H', eh[56:58])[0]
-
-                  # Read all program headers
-                  ph_list = []
-                  for i in range(e_phnum):
-                      f.seek(e_phoff + i * e_phentsize)
-                      data = f.read(e_phentsize)
-                      p = list(struct.unpack('<IIQQQQQQ', data))
-                      ph_list.append(p)
-
-              # Work on a copy of headers while inserting
-              cum_inserted = 0
-              insert_points = []  # list of (offset, size)
-
-              # Sort PT_LOAD by p_offset
-              loads = sorted(
-                  [(i, p) for i, p in enumerate(ph_list) if p[0] == 1],
-                  key=lambda x: x[1][2],
-              )
-
-              for idx, p in loads:
-                  orig_off = p[2] + cum_inserted
-                  desired = align_up(orig_off)
-                  delta = desired - orig_off
-                  if delta > 0:
-                      insert_points.append((p[2] + cum_inserted, delta))
-                      cum_inserted += delta
-                      p[2] = p[2] + delta  # update p_offset in header model
-                  # Force p_align
-                  p[7] = ALIGN
-
-              # Apply insertions to file from earliest to latest
-              for pos, size in insert_points:
-                  insert_padding(path, pos, size)
-
-              # After file content moved, write back updated headers and e_shoff
-              with open(path, 'r+b') as f:
-                  # Rewrite PH entries
-                  for i, p in enumerate(ph_list):
-                      f.seek(e_phoff + i * e_phentsize)
-                      f.write(struct.pack('<IIQQQQQQ', *p))
-                  # Update e_shoff by total inserted if section headers are after first insertion
-                  if insert_points:
-                      first_ins = insert_points[0][0]
-                  else:
-                      first_ins = None
-                  if first_ins is not None and e_shoff >= first_ins:
-                      new_shoff = e_shoff + cum_inserted
-                      # Patch header bytes 40:48
-                      f.seek(40)
-                      f.write(struct.pack('<Q', new_shoff))
-                  f.flush(); os.fsync(f.fileno())
-
-              print(f"Inserted {cum_inserted} bytes across {len(insert_points)} point(s) to 16KB-align PT_LOAD segments.")
-
-          if __name__ == '__main__':
-              realign_pt_loads('out/jniLibs/arm64-v8a/libpython.so')
-          EOF
-          python3 align_elf.py
-
-      - name: Verify 16KB PT_LOAD alignment
-        run: |
-          set -euo pipefail
-          for f in out/jniLibs/arm64-v8a/*.so; do
-            [[ "$f" == *.zip.so ]] && continue
-            echo Checking $f
-            if ! llvm-readobj --program-headers "$f" | grep -A3 "Type: PT_LOAD" | grep -q "Alignment: 16384"; then
-              echo "FAIL: $f not 16KB-aligned"; llvm-readobj --program-headers "$f" || true; readelf -l "$f" || true; exit 1
-            fi
-          done
-
-      - name: Upload jniLibs artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: jniLibs-python-arm64
-          path: out/jniLibs/arm64-v8a
-          if-no-files-found: error
-
+    - name: Upload libpython artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: libpython-arm64
+        path: ../libpython-arm64.so

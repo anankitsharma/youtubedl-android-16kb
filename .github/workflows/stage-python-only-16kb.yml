@@ -69,11 +69,7 @@ jobs:
           pkg=termux-packages/packages/python/build.sh
           if [ -f "$pkg" ]; then
             echo 'TERMUX_PKG_EXTRA_LDFLAGS+=" -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 "' | tee -a "$pkg"
-            # Ensure Python links shared libs with the extra LDFLAGS by exporting in recipe
-            echo 'export LDFLAGS="${LDFLAGS:-} $TERMUX_PKG_EXTRA_LDFLAGS"' | tee -a "$pkg"
-            echo 'export LDSHARED="${CC:-cc} -shared $TERMUX_PKG_EXTRA_LDFLAGS"' | tee -a "$pkg"
-            echo 'export LDCXXSHARED="${CXX:-c++} -shared $TERMUX_PKG_EXTRA_LDFLAGS"' | tee -a "$pkg"
-            echo 'export LINKFORSHARED="$TERMUX_PKG_EXTRA_LDFLAGS"' | tee -a "$pkg"
+            # Prefer passing these via docker env so CC/CXX resolve inside builder
           fi
 
       - name: Build Python

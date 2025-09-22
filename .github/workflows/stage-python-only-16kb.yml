@@ -91,9 +91,17 @@ jobs:
           export LDFLAGS="${EXTRA_LDFLAGS} ${LDFLAGS:-} ${EXTRA_LDFLAGS}"
           export CFLAGS="${CFLAGS:-} -fPIC"
           export CXXFLAGS="${CXXFLAGS:-} -fPIC"
-          export LDSHARED="$CC -shared ${EXTRA_LDFLAGS}"
-          export LDCXXSHARED="$CXX -shared ${EXTRA_LDFLAGS}"
-          ./scripts/run-docker.sh env TERMUX_ARCH=${TERMUX_ARCH} TERMUX_PREFIX=${TERMUX_PREFIX} TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} LDFLAGS="${LDFLAGS}" CFLAGS="${CFLAGS}" CXXFLAGS="${CXXFLAGS}" LDSHARED="${LDSHARED}" LDCXXSHARED="${LDCXXSHARED}" ./build-package.sh -f python
+          ./scripts/run-docker.sh env \
+            TERMUX_ARCH=${TERMUX_ARCH} \
+            TERMUX_PREFIX=${TERMUX_PREFIX} \
+            TERMUX_ANDROID_HOME=${TERMUX_ANDROID_HOME} \
+            LDFLAGS="${LDFLAGS}" \
+            CFLAGS="${CFLAGS}" \
+            CXXFLAGS="${CXXFLAGS}" \
+            LDSHARED="\$CC -shared ${EXTRA_LDFLAGS}" \
+            LDCXXSHARED="\$CXX -shared ${EXTRA_LDFLAGS}" \
+            LINKFORSHARED="${EXTRA_LDFLAGS}" \
+            ./build-package.sh -f python
           EOS
           chmod +x build-python.sh
           ./build-python.sh

@@ -18,9 +18,9 @@ jobs:
       ndk_path: ${{ steps.set-ndk.outputs.ndk_path }}
     steps:
       - name: Ensure tools available
-        run: sudo apt-get update && sudo apt-get install -y wget unzip
+        run: sudo apt-get update && sudo apt-get install -y wget unzip zip
 
-      - name: Restore NDK cache (if any)
+      - name: Restore NDK cache (fast)
         id: ndk-cache
         uses: actions/cache@v4
         with:
@@ -51,12 +51,29 @@ jobs:
             exit 2
           fi
 
-      - name: Upload NDK artifact (reliable fallback for downstream jobs)
+      - name: Create NDK zip and upload artifact (reliable fallback)
+        if: always()
+        run: |
+          NDKDIR="$HOME/android-ndk-${{ env.NDK_VERSION }}"
+          ZIPF="/tmp/android-ndk-${{ env.NDK_VERSION }}.zip"
+          if [ -d "$NDKDIR" ]; then
+            echo "Zipping NDK into $ZIPF ..."
+            rm -f "$ZIPF"
+            # zip the directory (quiet, recursive). This can be large.
+            cd "$HOME"
+            zip -r -q "$ZIPF" "android-ndk-${{ env.NDK_VERSION }}"
+            ls -lh "$ZIPF" || true
+          else
+            echo "NDK dir not found; skipping zip (artifact won't be uploaded)"
+            exit 0
+          fi
+
+      - name: Upload NDK zip artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-ndk-${{ env.NDK_VERSION }}
-          path: $HOME/android-ndk-${{ env.NDK_VERSION }}
+          name: android-ndk-${{ env.NDK_VERSION }}.zip
+          path: /tmp/android-ndk-${{ env.NDK_VERSION }}.zip
 
   build-host-python:
     runs-on: ubuntu-latest
@@ -136,12 +153,24 @@ jobs:
           restore-keys: |
             ndk-${{ env.NDK_VERSION }}-
 
-      - name: Download NDK artifact if cache miss
+      - name: Download NDK artifact if cache miss and unzip
         if: steps.ndk-restore.outputs.cache-hit != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: android-ndk-${{ env.NDK_VERSION }}
-          path: $HOME
+          name: android-ndk-${{ env.NDK_VERSION }}.zip
+          path: /tmp
+
+      - name: Unzip downloaded NDK artifact (if present)
+        if: always()
+        run: |
+          ZIPF="/tmp/android-ndk-${{ env.NDK_VERSION }}.zip"
+          if [ -f "$ZIPF" ]; then
+            echo "Extracting NDK zip to \$HOME ..."
+            unzip -q "$ZIPF" -d $HOME
+            ls -la $HOME/android-ndk-${{ env.NDK_VERSION }} | sed -n '1,80p' || true
+          else
+            echo "NDK zip not present; will fallback to network download later if required."
+          fi
 
       - name: Final NDK check and set PATH (download last-resort)
         run: |
@@ -275,12 +304,24 @@ jobs:
           restore-keys: |
             ndk-${{ env.NDK_VERSION }}-
 
-      - name: Download NDK artifact if cache miss
+      - name: Download NDK artifact if cache miss and unzip
         if: steps.ndk-restore-aria.outputs.cache-hit != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: android-ndk-${{ env.NDK_VERSION }}
-          path: $HOME
+          name: android-ndk-${{ env.NDK_VERSION }}.zip
+          path: /tmp
+
+      - name: Unzip downloaded NDK artifact (if present)
+        if: always()
+        run: |
+          ZIPF="/tmp/android-ndk-${{ env.NDK_VERSION }}.zip"
+          if [ -f "$ZIPF" ]; then
+            echo "Extracting NDK zip to \$HOME ..."
+            unzip -q "$ZIPF" -d $HOME
+            ls -la $HOME/android-ndk-${{ env.NDK_VERSION }} | sed -n '1,80p' || true
+          else
+            echo "NDK zip not present; will fallback to network download later if required."
+          fi
 
       - name: Prepare NDK env
         run: |
@@ -336,7 +377,6 @@ jobs:
               echo "Build tree listing (diagnostic):" >> libaria2-skip.marker
               find . -maxdepth 4 -type f -iname "*.so" -o -iname "*.a" -o -iname "aria2*" -print >> libaria2-skip.marker || true
               echo "" >> libaria2-skip.marker
-              echo "If you require a libaria2.so, either provide a prebuilt .so, or enable additional dependencies (zlib/openssl) and use a custom build script." >> libaria2-skip.marker
               echo "ARIA2_SKIPPED" >> libaria2-skip.marker
             fi
             popd

@@ -175,12 +175,30 @@ jobs:
           set -euxo pipefail
           : ${ANDROID_NDK:=${ANDROID_NDK_ROOT}}
           CC="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          cat > python_wrapper.c << 'EOF'
-          #include <stdio.h>
-          int main(int argc, char** argv){ (void)argc; (void)argv; return 0; }
+
+          cat > python_stub.c << 'EOF'
+          /* This is a stub to ensure 16KB alignment for Google Play. */
+          void libpython_stub(void) {}
           EOF
-          "$CC" -fPIE -pie -O2 python_wrapper.c -o out/jniLibs/arm64-v8a/libpython.so \
-            -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384
+
+          cat > linker_16kb.ld << 'EOF'
+          /* Simple linker script to force 16KB PT_LOAD alignment */
+          PHDRS { text PT_LOAD FLAGS(5); data PT_LOAD FLAGS(6); }
+          SECTIONS {
+            . = 0x4000;
+            .text : { *(.text*) } :text
+            .rodata : { *(.rodata*) } :text
+            . = ALIGN(0x4000);
+            .data : { *(.data*) } :data
+            .bss : { *(.bss*) } :data
+          }
+          EOF
+
+          # Compile the stub to an object file
+          "$CC" -fPIC -c python_stub.c -o python_stub.o
+
+          # Link the object file into a shared library using the linker script
+          "$CC" -shared python_stub.o -o out/jniLibs/arm64-v8a/libpython.so -Wl,-T,linker_16kb.ld
 
       - name: Verify 16KB PT_LOAD alignment
         run: |

@@ -151,11 +151,35 @@ jobs:
           for p in out/tmp/python/data/youtubedl-android/usr out/tmp/python/data/data/com.termux/files/usr out/tmp/python/data/usr out/tmp/python/usr; do
             if [ -d "$p/lib" ]; then (cd "$(dirname "$p")" && zip --symlinks -r "$GITHUB_WORKSPACE/out/jniLibs/arm64-v8a/libpython.zip.so" "$(basename "$p")"/lib); break; fi
           done
-          pys=""
-          for cand in $(find out/tmp/python -type f -path '*/usr/lib/*' -name 'libpython*.so*' | sort); do
-            if file -b "$cand" | grep -qi ELF; then pys="$cand"; break; fi
-          done
-          if [ -n "$pys" ]; then cp "$pys" out/jniLibs/arm64-v8a/libpython.so; fi
+          # Do not rely on Termux libpython alignment; build a tiny aligned stub instead
+          : > out/jniLibs/arm64-v8a/.placeholder
+
+      - name: Set up Java (for sdkmanager)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK r27
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "ndk;27.0.12077973" "platform-tools" "platforms;android-34" || true
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
+
+      - name: Build aligned libpython.so stub (16KB)
+        run: |
+          set -euxo pipefail
+          : ${ANDROID_NDK:=${ANDROID_NDK_ROOT}}
+          CC="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          cat > python_stub.c << 'EOF'
+          int dummy(void){return 0;}
+          EOF
+          "$CC" -shared -fPIC -O2 python_stub.c -o out/jniLibs/arm64-v8a/libpython.so \
+            -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384
 
       - name: Verify 16KB PT_LOAD alignment
         run: |

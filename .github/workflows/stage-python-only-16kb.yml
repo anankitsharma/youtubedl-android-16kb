@@ -163,17 +163,43 @@ jobs:
           fi
       - name: Prepare environment and ensure NDK present
         run: |
-          # prefer job output from prepare-ndk, fallback to standard path
-          NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
+          # Try job output from prepare-ndk first, then fallback to $HOME, then runner.temp cache
+          NDK="${{ needs.prepare-ndk.outputs.ndk_path }}"
+
+          echo "Initial NDK from job output: '$NDK'"
+
+          # If job output empty or not a dir, try default $HOME path
           if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
-            NDK="$HOME/android-ndk-${{ env.NDK_VERSION }}"
+            if [ -d "$HOME/android-ndk-${{ env.NDK_VERSION }}" ]; then
+              NDK="$HOME/android-ndk-${{ env.NDK_VERSION }}"
+              echo "Falling back to \$HOME path: $NDK"
+            fi
           fi
-          echo "NDK used: $NDK"
-          if [ ! -d "$NDK" ]; then
-            echo "ERROR: NDK not found at $NDK"
+
+          # If still missing, check runner.temp cache (this is where prepare-ndk writes cached copy)
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            CACHE_NDK="${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}"
+            if [ -d "$CACHE_NDK" ]; then
+              echo "Found NDK in runner.temp cache: $CACHE_NDK"
+              # copy into $HOME so Android toolchain path is stable in this job
+              rm -rf "$HOME/android-ndk-${{ env.NDK_VERSION }}" || true
+              cp -r "$CACHE_NDK" "$HOME/"
+              NDK="$HOME/android-ndk-${{ env.NDK_VERSION }}"
+              echo "Copied cached NDK -> $NDK"
+            fi
+          fi
+
+          # Final check: fail with helpful debugging if not found
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            echo "ERROR: NDK not found after all fallbacks."
+            echo "Listing $HOME:"
             ls -la $HOME || true
+            echo "Listing runner.temp:"
+            ls -la "${{ runner.temp }}" || true
             exit 5
           fi
+
+          echo "NDK used: $NDK"
           echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
           export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
       - name: Download CPython sources (copy)
@@ -190,7 +216,7 @@ jobs:
           set -euo pipefail
           PY=${{ env.PYTHON_VERSION }}
           # use NDK from job output if available
-          NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
+          NDK="${{ needs.prepare-ndk.outputs.ndk_path }}"
           if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
             NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
           fi
@@ -257,7 +283,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake git autoconf automake libtool pkg-config
       - name: Prepare NDK env
         run: |
-          NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
+          NDK="${{ needs.prepare-ndk.outputs.ndk_path }}"
           if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
             NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
           fi
@@ -271,7 +297,7 @@ jobs:
           set -e
           if [ -f "aria2-src/CMakeLists.txt" ]; then
             echo "Found CMakeLists.txt — building with CMake"
-            NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
+            NDK="${{ needs.prepare-ndk.outputs.ndk_path }}"
             if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
               NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
             fi
@@ -290,9 +316,13 @@ jobs:
             cmake --build . -- -j${{ env.MAKE_JOBS }} || true
             LIBA=$(find . -type f -name "libaria2*.so" -o -name "libaria2c*.so" | head -n1 || true)
             if [ -n "$LIBA" ]; then
+              echo "Found built library at: $LIBA"
               cp "$LIBA" ../../libaria2-arm64.so
             else
-              echo "CMake completed but no libaria2 found — creating skip marker"
+              echo "CMake completed but no libaria2 shared object found in build directories."
+              echo "Listing built tree for diagnosis:"
+              find . -maxdepth 4 -type f -iname "*.so" -o -iname "*.a" -o -iname "aria2*" -print || true
+              echo "Creating explicit skip marker: libaria2-skip.marker"
               echo "ARIA2_SKIPPED" > libaria2-skip.marker
             fi
             popd
@@ -345,7 +375,7 @@ jobs:
             fi
             file libaria2-arm64.so || true
           elif [ -f libaria2-skip.marker ]; then
-            echo "aria2 build was intentionally skipped (no CMakeLists in upstream repo)."
+            echo "aria2 build was intentionally skipped (no CMakeLists in upstream repo or no shared lib produced)."
           else
             echo "aria2 artifact not present; you can provide a prebuilt libaria2 and re-run."
           fi

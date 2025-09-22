@@ -59,7 +59,6 @@ jobs:
           if [ -d "$NDKDIR" ]; then
             echo "Zipping NDK into $ZIPF ..."
             rm -f "$ZIPF"
-            # zip the directory (quiet, recursive). This can be large.
             cd "$HOME"
             zip -r -q "$ZIPF" "android-ndk-${{ env.NDK_VERSION }}"
             ls -lh "$ZIPF" || true
@@ -227,7 +226,7 @@ jobs:
           fi
           cp -r /tmp/Python-${PY} .
 
-      - name: Cross-compile CPython (libpython.so) with --disable-ipv6 (LD_LIBRARY_PATH set)
+      - name: Cross-compile CPython (libpython.so) with --disable-ipv6 (clang --target fix)
         shell: bash
         run: |
           set -euo pipefail
@@ -244,8 +243,9 @@ jobs:
           SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           cd Python-${PY}
 
-          export CC=${TARGET}${API}-clang
-          export CXX=${TARGET}${API}-clang++
+          # Use clang with explicit --target and sysroot (avoids "C compiler cannot create executables")
+          export CC="clang --target=${TARGET}${API} --sysroot=${SYSROOT}"
+          export CXX="clang++ --target=${TARGET}${API} --sysroot=${SYSROOT}"
           export AR=${TARGET}-ar
           export RANLIB=${TARGET}-ranlib
           export STRIP=${TARGET}-strip
@@ -259,6 +259,11 @@ jobs:
           echo "Using build python: $BUILD_PYTHON"
           $BUILD_PYTHON -V || ( echo "ERROR: build python does not run; aborting." && ldd $BUILD_PYTHON || true ; exit 5 )
 
+          echo "CC: $CC"
+          echo "SYSROOT: $SYSROOT"
+          echo "CFLAGS: $CFLAGS"
+          echo "LDFLAGS: $LDFLAGS"
+
           ./configure \
             --host=${TARGET} \
             --build=$(./config.guess) \
@@ -267,7 +272,6 @@ jobs:
             --with-build-python=${BUILD_PYTHON} \
             --disable-ipv6 \
             ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
-            CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
             CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
 
           make -j${{ env.MAKE_JOBS }}
@@ -276,7 +280,6 @@ jobs:
           LIBPATH=$(find . -name "libpython*.so" | head -n1 || true)
           if [ -z "$LIBPATH" ]; then
             echo "libpython not found; failing for diagnosis"
-            ls -la
             find . -maxdepth 3 -type f -name "*.so" -print || true
             exit 2
           fi

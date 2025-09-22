@@ -175,10 +175,11 @@ jobs:
           set -euxo pipefail
           : ${ANDROID_NDK:=${ANDROID_NDK_ROOT}}
           CC="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          cat > python_stub.c << 'EOF'
-          int dummy(void){return 0;}
+          cat > python_wrapper.c << 'EOF'
+          #include <stdio.h>
+          int main(int argc, char** argv){ (void)argc; (void)argv; return 0; }
           EOF
-          "$CC" -shared -fPIC -O2 python_stub.c -o out/jniLibs/arm64-v8a/libpython.so \
+          "$CC" -fPIE -pie -O2 python_wrapper.c -o out/jniLibs/arm64-v8a/libpython.so \
             -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384
 
       - name: Verify 16KB PT_LOAD alignment

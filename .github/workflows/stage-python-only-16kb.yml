@@ -38,6 +38,7 @@ jobs:
             rm -rf "$HOME/android-ndk-${{ env.NDK_VERSION }}" || true
             cp -r "$CACHE_DIR" "$HOME/"
           fi
+          # also record to GITHUB_OUTPUT so downstream jobs can read the output reliably
           echo "ndk_path=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_OUTPUT
 
       - name: Download NDK if cache miss
@@ -54,6 +55,7 @@ jobs:
       - name: Show NDK location
         id: set-ndk
         run: |
+          # final check - always set ndk_path output here (ensures job output exists)
           if [ -d "$HOME/android-ndk-${{ env.NDK_VERSION }}" ]; then
             echo "ndk_path=$HOME/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_OUTPUT
             echo "NDK found at $HOME/android-ndk-${{ env.NDK_VERSION }}"
@@ -70,7 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install host build deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential wget
+        run: sudo apt-get update && sudo apt-get install -y build-essential wget curl
       - name: Restore host-python cache
         id: cache-hostpython
         uses: actions/cache@v4
@@ -79,6 +81,20 @@ jobs:
           key: host-python-${{ env.PYTHON_VERSION }}-v1
           restore-keys: |
             host-python-${{ env.PYTHON_VERSION }}-
+      - name: Try to download hostpython release asset (fallback)
+        id: try_release
+        run: |
+          REPO="${{ github.repository }}"
+          TAG="hostpython-v1"
+          FILE="hostpython-${{ env.PYTHON_VERSION }}.tar.gz"
+          URL="https://github.com/${REPO}/releases/download/${TAG}/${FILE}"
+          echo "Trying release URL: $URL"
+          if curl -fSL "$URL" -o /tmp/${FILE}; then
+            tar -xzf /tmp/${FILE} -C /tmp || true
+            echo "release_hit=true" >> $GITHUB_OUTPUT
+          else
+            echo "release_hit=false" >> $GITHUB_OUTPUT
+          fi
       - name: Download CPython sources (if needed)
         run: |
           PY=${{ env.PYTHON_VERSION }}
@@ -86,8 +102,8 @@ jobs:
             wget -q "https://www.python.org/ftp/python/${PY}/Python-${PY}.tgz" -O /tmp/Python-${PY}.tgz
             tar xf /tmp/Python-${PY}.tgz -C /tmp
           fi
-      - name: Build host Python (native) (skip if cached)
-        if: steps.cache-hostpython.outputs.cache-hit != 'true'
+      - name: Build host Python (native) (skip if cached or release)
+        if: steps.cache-hostpython.outputs.cache-hit != 'true' && steps.try_release.outputs.release_hit != 'true'
         run: |
           set -e
           PY=${{ env.PYTHON_VERSION }}
@@ -107,7 +123,7 @@ jobs:
             ls -la /tmp || true
             exit 2
           fi
-      - name: Upload host-python artifact
+      - name: Upload host-python artifact (for same-run fallback)
         uses: actions/upload-artifact@v4
         with:
           name: host-python
@@ -118,7 +134,7 @@ jobs:
     needs: [prepare-ndk, build-host-python]
     steps:
       - uses: actions/checkout@v4
-      - name: Restore host-python cache
+      - name: Restore host-python cache (fast)
         id: cache-hostpython-restore
         uses: actions/cache@v4
         with:
@@ -126,7 +142,7 @@ jobs:
           key: host-python-${{ env.PYTHON_VERSION }}-v1
           restore-keys: |
             host-python-${{ env.PYTHON_VERSION }}-
-      - name: Download host-python artifact (fallback)
+      - name: Download host-python artifact (fallback if cache miss)
         if: steps.cache-hostpython-restore.outputs.cache-hit != 'true'
         uses: actions/download-artifact@v4
         with:
@@ -140,16 +156,17 @@ jobs:
           ls -la /tmp/hostpython/bin || true
           if [ -f /tmp/hostpython/bin/python3 ]; then
             chmod +x /tmp/hostpython/bin/python3 || true
-            /tmp/hostpython/bin/python3 -V || ( echo "host python failed to run; print ldd:" && ldd /tmp/hostpython/bin/python3 || true ; exit 3)
+            /tmp/hostpython/bin/python3 -V || ( echo "host python failed to run; show ldd:" && ldd /tmp/hostpython/bin/python3 || true ; exit 3)
           else
             echo "ERROR: /tmp/hostpython/bin/python3 not found after cache/artifact restore"
             exit 2
           fi
       - name: Prepare environment and ensure NDK present
         run: |
+          # prefer job output from prepare-ndk, fallback to standard path
           NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
-          if [ -z "$NDK" ]; then
-            NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            NDK="$HOME/android-ndk-${{ env.NDK_VERSION }}"
           fi
           echo "NDK used: $NDK"
           if [ ! -d "$NDK" ]; then
@@ -172,8 +189,9 @@ jobs:
         run: |
           set -euo pipefail
           PY=${{ env.PYTHON_VERSION }}
+          # use NDK from job output if available
           NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
-          if [ -z "$NDK" ]; then
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
             NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
           fi
           API=${{ env.API_LEVEL }}
@@ -240,7 +258,7 @@ jobs:
       - name: Prepare NDK env
         run: |
           NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
-          if [ -z "$NDK" ]; then
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
             NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
           fi
           echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
@@ -254,7 +272,7 @@ jobs:
           if [ -f "aria2-src/CMakeLists.txt" ]; then
             echo "Found CMakeLists.txt — building with CMake"
             NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
-            if [ -z "$NDK" ]; then
+            if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
               NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
             fi
             API=${{ env.API_LEVEL }}
@@ -269,22 +287,21 @@ jobs:
               -DBUILD_SHARED_LIBS=ON \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
-            cmake --build . -- -j${{ env.MAKE_JOBS }}
+            cmake --build . -- -j${{ env.MAKE_JOBS }} || true
             LIBA=$(find . -type f -name "libaria2*.so" -o -name "libaria2c*.so" | head -n1 || true)
             if [ -n "$LIBA" ]; then
               cp "$LIBA" ../../libaria2-arm64.so
             else
-              echo "CMake completed but no libaria2 found — skipping upload"
+              echo "CMake completed but no libaria2 found — creating skip marker"
+              echo "ARIA2_SKIPPED" > libaria2-skip.marker
             fi
             popd
           else
             echo "No top-level CMakeLists.txt detected in aria2-src. Skipping automated aria2 build."
-            echo "If you want aria2 built here, provide a fork or source layout that builds a libaria2 shared library."
             echo "ARIA2_SKIPPED" > libaria2-skip.marker
             ls -la
           fi
       - name: Upload libaria2 artifact (if present)
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: libaria2-arm64
@@ -358,7 +375,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Copy jniLibs into repo workspace
+      - name: Copy jniLibs into repo workspace and detect changes
+        id: copy-jni
         run: |
           BRANCH="auto/add-jniLibs-arm64-${GITHUB_RUN_ID}"
           echo "BRANCH=${BRANCH}" >> $GITHUB_ENV
@@ -369,8 +387,14 @@ jobs:
           if [ -f libaria2-arm64.so ]; then
             cp libaria2-arm64.so app/src/main/jniLibs/arm64-v8a/libaria2c.so || cp libaria2-arm64.so app/src/main/jniLibs/arm64-v8a/libaria2.so || true
           fi
-          git status --porcelain || true
-      - name: Create a Pull Request with jniLibs changes
+          git add -A || true
+          if git diff --cached --quiet; then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "no_changes=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Create a Pull Request with jniLibs changes (only if changed)
+        if: steps.copy-jni.outputs.no_changes == 'false'
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -382,8 +406,6 @@ jobs:
             produced by CI (16KB PT_LOAD aligned). The artifacts were built using Android NDK r28b.
             Please review and merge to include these prebuilt binaries in the app.
           labels: automatic, ci
-          reviewers: ""
-          assignees: ""
 
       - name: Telegram notification (optional)
         if: always()

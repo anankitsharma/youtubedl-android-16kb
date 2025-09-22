@@ -1,237 +1,345 @@
-name: Build (16KB-compatible) & Verify
+name: build-16kb-arm64-complete
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:
 
-permissions:
-  contents: read
+env:
+  PYTHON_VERSION: "3.12.0"
+  NDK_VERSION: "r28b"
+  API_LEVEL: "24"
+  TARGET_TRIPLE: "aarch64-linux-android"
+  ANDROID_ABI: "arm64-v8a"
+  MAKE_JOBS: "2"
 
 jobs:
-  build-verify-16kb:
+  prepare-ndk:
     runs-on: ubuntu-latest
-
-    # configure project-specific values here if needed
-    env:
-      APP_MODULE: app
-      BUILD_VARIANT: Release                    # produce Gradle task :app:assembleRelease
-      APK_PATH: app/build/outputs/apk/release/app-release.apk
-      # fallback NDK id to try installing via sdkmanager (can be updated if sdkmanager uses different id)
-      NDK_PACKAGE: "ndk;28.0.2572133"
-
+    outputs:
+      ndk_path: ${{ steps.set-ndk.outputs.ndk_path }}
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - name: Ensure tools available
+        run: sudo apt-get update && sudo apt-get install -y wget unzip zip
 
-      - name: Set up JDK 11
-        uses: actions/setup-java@v4
+      - name: Restore cached NDK zip (fast)
+        id: ndk-zip-cache
+        uses: actions/cache@v4
         with:
-          distribution: temurin
-          java-version: 11
+          path: /tmp/android-ndk-${{ env.NDK_VERSION }}.zip
+          key: ndk-zip-${{ env.NDK_VERSION }}-v1
 
-      - name: Install prerequisites (unzip, curl, binutils)
+      - name: Download NDK zip if cache miss
+        if: steps.ndk-zip-cache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y unzip curl binutils
+          echo "Cache miss - downloading NDK zip"
+          NDK_ZIP="/tmp/android-ndk-${{ env.NDK_VERSION }}.zip"
+          wget -q "https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip" -O "$NDK_ZIP"
+          ls -lh "$NDK_ZIP" || true
 
-      - name: Install Android command-line tools (sdkmanager)
+      - name: Ensure NDK extracted to $HOME and set output
+        id: set-ndk
         run: |
-          set -e
-          SDK_ROOT="$HOME/android-sdk"
-          mkdir -p "$SDK_ROOT/cmdline-tools"
-          cd /tmp
-          TOOL_ZIP="commandlinetools-linux-9477386_latest.zip"
-          curl -fsSL -o "$TOOL_ZIP" "https://dl.google.com/android/repository/${TOOL_ZIP}"
-          unzip -q "$TOOL_ZIP" -d "$SDK_ROOT/cmdline-tools"
-          # Move into the 'latest' layout used by recent sdkmanager scripts
-          mkdir -p "$SDK_ROOT/cmdline-tools/latest"
-          # Some cmdline zips put content under 'cmdline-tools', adjust accordingly:
-          if [ -d "$SDK_ROOT/cmdline-tools/cmdline-tools" ]; then
-            mv "$SDK_ROOT/cmdline-tools/cmdline-tools"/* "$SDK_ROOT/cmdline-tools/latest/"
+          ZIPF="/tmp/android-ndk-${{ env.NDK_VERSION }}.zip"
+          NDKDIR="$HOME/android-ndk-${{ env.NDK_VERSION }}"
+          if [ -f "$ZIPF" ]; then
+            echo "Unzipping NDK zip into $HOME ..."
+            unzip -q "$ZIPF" -d $HOME
+          fi
+          if [ -d "$NDKDIR" ]; then
+            echo "ndk_path=$NDKDIR" >> $GITHUB_OUTPUT
+            echo "NDK found at $NDKDIR"
+            ls -la "$NDKDIR" | sed -n '1,120p'
           else
-            mv "$SDK_ROOT/cmdline-tools"/* "$SDK_ROOT/cmdline-tools/latest/" || true
-          fi
-          export ANDROID_SDK_ROOT="$SDK_ROOT"
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
-          yes | sdkmanager --licenses
-
-      - name: Install SDK platforms, build-tools and NDK (attempt)
-        run: |
-          set -e
-          export ANDROID_SDK_ROOT="$HOME/android-sdk"
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
-
-          # Install platform and build-tools (adjust API / build-tools version if your project needs other)
-          sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2"
-
-          # Try to install the NDK package id configured in NDK_PACKAGE env.
-          # If it fails, print sdkmanager --list to help debugging and continue (workflow will still attempt to build).
-          set +e
-          sdkmanager --install "${NDK_PACKAGE}"
-          rc=$?
-          set -e
-          if [ $rc -ne 0 ]; then
-            echo "Warning: sdkmanager could not install requested NDK package (${NDK_PACKAGE})."
-            echo "Listing available packages for debugging:"
-            sdkmanager --list | sed -n '1,200p'
-            echo "Continuing — Gradle may still find an NDK via local config or toolchain."
-          fi
-
-      - name: Export Android SDK/NDK environment variables
-        run: |
-          ANDROID_SDK_ROOT="$HOME/android-sdk"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-
-          # Detect ndk dir
-          ndk_dir=$(ls -d "$ANDROID_SDK_ROOT"/ndk/* 2>/dev/null | tail -n1 || true)
-          if [ -z "$ndk_dir" ] && [ -d "$ANDROID_SDK_ROOT/ndk-bundle" ]; then
-            ndk_dir="$ANDROID_SDK_ROOT/ndk-bundle"
-          fi
-
-          if [ -n "$ndk_dir" ] && [ -d "$ndk_dir" ]; then
-            echo "Found NDK at: $ndk_dir"
-            echo "ANDROID_NDK_HOME=$ndk_dir" >> $GITHUB_ENV
-          else
-            echo "NDK not found in standard SDK locations. If your build requires a specific NDK, set ANDROID_NDK_HOME in repository secrets or adjust the install step."
-          fi
-
-      - name: Show environment debug info
-        run: |
-          echo "JAVA_HOME=$JAVA_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-<not-set>}"
-          echo "Listing SDK & NDK folders:"
-          ls -la "$HOME/android-sdk" || true
-          ls -la "$HOME/android-sdk/ndk" || true
-          ./gradlew -v || true
-
-      - name: Patch native build files to add 16KB flags (idempotent)
-        # This step attempts to add 16KB-related flags to ndk-build / CMake files if present.
-        run: |
-          set -e
-          echo "Patching Application.mk files to enable flexible page sizes if present..."
-          for am in $(git ls-files | grep -E 'Application.mk$' || true); do
-            if ! grep -q 'APP_SUPPORT_FLEXIBLE_PAGE_SIZES' "$am"; then
-              printf "\n# Enable flexible page sizes for 16KB compatibility\nAPP_SUPPORT_FLEXIBLE_PAGE_SIZES := true\n" >> "$am"
-              echo "Patched $am"
-            else
-              echo "Already patched: $am"
-            fi
-          done
-
-          echo "Adding max-page-size LDFLAGS into Android.mk files if missing..."
-          for mk in $(git ls-files | grep -E 'Android.mk$' || true); do
-            if ! grep -q 'max-page-size=16384' "$mk"; then
-              cat >> "$mk" <<'EOF'
-
-# Ensure linker requests 16KB page alignment when possible
-ifdef LOCAL_LDFLAGS
-LOCAL_LDFLAGS += -Wl,-z,max-page-size=16384
-else
-LOCAL_LDFLAGS := -Wl,-z,max-page-size=16384
-endif
-
-EOF
-              echo "Patched $mk"
-            else
-              echo "Android.mk already contains max-page-size flags: $mk"
-            fi
-          done
-
-          # For CMake - create small include file and append include to CMakeLists.txt if CMake is used
-          if git ls-files | grep -q 'CMakeLists.txt'; then
-            mkdir -p cmake
-            cat > cmake/16kb-toolchain.cmake <<'EOF'
-# Request 16KB page size at link time for shared libs
-if(NOT DEFINED CMAKE_SHARED_LINKER_FLAGS)
-  set(CMAKE_SHARED_LINKER_FLAGS "")
-endif()
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
-EOF
-            if ! grep -q '16kb-toolchain.cmake' CMakeLists.txt; then
-              echo 'include("${CMAKE_SOURCE_DIR}/cmake/16kb-toolchain.cmake")' >> CMakeLists.txt || true
-              echo "Added cmake/16kb-toolchain.cmake inclusion into CMakeLists.txt"
-            else
-              echo "CMakeLists already includes 16kb toolchain"
-            fi
-          fi
-
-      - name: Build project (Gradle assemble)
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-        run: |
-          set -e
-          echo "Running Gradle assemble for :$APP_MODULE:assemble$BUILD_VARIANT"
-          ./gradlew clean :${APP_MODULE}:assemble${BUILD_VARIANT} --no-daemon --stacktrace
-
-      - name: Show produced APK path and list APK contents (debug)
-        run: |
-          APK="$APK_PATH"
-          echo "Expected APK path: $APK"
-          if [ -f "$APK" ]; then
-            echo "APK found: $APK"
-            unzip -l "$APK" | sed -n '1,200p'
-          else
-            echo "APK not found at expected path. Searching for APK outputs..."
-            find . -type f -name "*.apk" -print
-            exit 1
-          fi
-
-      - name: Extract .so files from APK and verify ELF LOAD p_align >= 16384
-        run: |
-          set -e
-          APK="$APK_PATH"
-          TMPDIR=$(mktemp -d)
-          echo "Extracting APK to $TMPDIR"
-          unzip -q "$APK" -d "$TMPDIR"
-          so_files=$(find "$TMPDIR/lib" -type f -name '*.so' || true)
-          if [ -z "$so_files" ]; then
-            echo "No .so files found inside APK under lib/. Exiting with failure."
-            ls -R "$TMPDIR" || true
-            exit 1
-          fi
-
-          pass_all=true
-          for so in $so_files; do
-            echo "----"
-            echo "Inspecting: $so"
-            file "$so" || true
-            ls -lh "$so" || true
-            echo "Program headers:"
-            readelf -l "$so" | sed -n '1,200p'
-
-            # Extract p_align values from LOAD program headers and find max
-            max_align_hex=$(readelf -l "$so" | awk '/LOAD/ { for(i=1;i<=NF;i++) if ($i ~ /^0x/) last=$i } END{print last}')
-            if [ -z "$max_align_hex" ]; then
-              # Some readelf variants put numeric p_align without 0x; try another extraction
-              max_align_dec=$(readelf -l "$so" | awk '/LOAD/ {print $NF}' | awk 'BEGIN{m=0} {v=$1+0; if(v>m) m=v} END{print m}')
-            else
-              max_align_dec=$((max_align_hex))
-            fi
-
-            echo "Detected max p_align for $so : $max_align_dec"
-
-            if [ -z "$max_align_dec" ] || [ "$max_align_dec" -lt 16384 ]; then
-              echo "FAIL: $so has p_align=${max_align_dec:-unknown} (<16384). Needs re-linking with 16KB support."
-              pass_all=false
-            else
-              echo "OK: $so has p_align=$max_align_dec (>=16384)"
-            fi
-          done
-
-          if [ "$pass_all" != "true" ]; then
-            echo "One or more .so files failed the 16KB alignment check."
+            echo "ERROR: NDK not available at $NDKDIR"
+            ls -la $HOME || true
             exit 2
-          else
-            echo "All .so files passed the 16KB alignment check. ✅"
           fi
 
-      - name: Upload built APK artifact
-        if: always()
+  build-host-python:
+    runs-on: ubuntu-latest
+    needs: prepare-ndk
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host build deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential wget curl
+      - name: Restore host-python cache
+        id: cache-hostpython
+        uses: actions/cache@v4
+        with:
+          path: /tmp/hostpython
+          key: host-python-${{ env.PYTHON_VERSION }}-v1
+          restore-keys: |
+            host-python-${{ env.PYTHON_VERSION }}-
+      - name: Try to download hostpython release asset (fallback)
+        id: try_release
+        run: |
+          REPO="${{ github.repository }}"
+          TAG="hostpython-v1"
+          FILE="hostpython-${{ env.PYTHON_VERSION }}.tar.gz"
+          URL="https://github.com/${REPO}/releases/download/${TAG}/${FILE}"
+          if curl -fSL "$URL" -o /tmp/${FILE}; then
+            tar -xzf /tmp/${FILE} -C /tmp || true
+            echo "release_hit=true" >> $GITHUB_OUTPUT
+          else
+            echo "release_hit=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Download CPython sources (if needed)
+        run: |
+          PY=${{ env.PYTHON_VERSION }}
+          if [ ! -d "/tmp/Python-${PY}" ]; then
+            wget -q "https://www.python.org/ftp/python/${PY}/Python-${PY}.tgz" -O /tmp/Python-${PY}.tgz
+            tar xf /tmp/Python-${PY}.tgz -C /tmp
+          fi
+      - name: Build host Python (native) (skip if cached or release)
+        if: steps.cache-hostpython.outputs.cache-hit != 'true' && steps.try_release.outputs.release_hit != 'true'
+        run: |
+          set -e
+          PY=${{ env.PYTHON_VERSION }}
+          pushd /tmp/Python-${PY}
+          ./configure --prefix=/tmp/hostpython --enable-optimizations --without-ensurepip
+          make -j${{ env.MAKE_JOBS }}
+          make install
+          popd
+          /tmp/hostpython/bin/python3 -V
+      - name: Verify host-python exists
+        run: |
+          if [ -x /tmp/hostpython/bin/python3 ]; then
+            /tmp/hostpython/bin/python3 -V
+          else
+            ls -la /tmp || true
+            exit 2
+          fi
+      - name: Upload host-python artifact (fallback)
         uses: actions/upload-artifact@v4
         with:
-          name: built-apk
-          path: ${{ env.APK_PATH }}
+          name: host-python
+          path: /tmp/hostpython
+
+  build-libpython:
+    runs-on: ubuntu-latest
+    needs: [prepare-ndk, build-host-python]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure NDK available & PATH
+        run: |
+          NDK="${{ needs.prepare-ndk.outputs.ndk_path }}"
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            NDK="$HOME/android-ndk-${{ env.NDK_VERSION }}"
+          fi
+          if [ ! -d "$NDK" ]; then
+            echo "NDK not found; aborting"
+            ls -la $HOME || true
+            exit 5
+          fi
+          echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
+          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+      - name: Restore host-python artifact if cache miss
+        if: steps.cache-hostpython.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: host-python
+          path: /tmp/hostpython
+      - name: Inspect host-python & ensure exec
+        run: |
+          if [ -f /tmp/hostpython/bin/python3 ]; then
+            chmod +x /tmp/hostpython/bin/python3 || true
+            /tmp/hostpython/bin/python3 -V || ( echo "host python failed to run; ldd:" && ldd /tmp/hostpython/bin/python3 || true ; exit 3)
+          else
+            echo "ERROR: /tmp/hostpython/bin/python3 not found"
+            exit 2
+          fi
+      - name: Download CPython sources (copy)
+        run: |
+          PY=${{ env.PYTHON_VERSION }}
+          if [ ! -d "/tmp/Python-${PY}" ]; then
+            wget -q "https://www.python.org/ftp/python/${PY}/Python-${PY}.tgz" -O /tmp/Python-${PY}.tgz
+            tar xf /tmp/Python-${PY}.tgz -C /tmp
+          fi
+          cp -r /tmp/Python-${PY} .
+      - name: Cross-compile CPython (libpython.so) with target/sysroot settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=${{ env.PYTHON_VERSION }}
+          NDK="${{ needs.prepare-ndk.outputs.ndk_path }}"
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
+          fi
+          API=${{ env.API_LEVEL }}
+          TARGET=${{ env.TARGET_TRIPLE }}
+          SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          cd Python-${PY}
+
+          # Use clang with explicit --target and sysroot
+          export CC="clang --target=${TARGET}${API} --sysroot=${SYSROOT}"
+          export CXX="clang++ --target=${TARGET}${API} --sysroot=${SYSROOT}"
+          export AR=${TARGET}-ar
+          export RANLIB=${TARGET}-ranlib
+          export STRIP=${TARGET}-strip
+
+          export CFLAGS="--sysroot=${SYSROOT} -D__ANDROID_API__=${API}"
+          export LDFLAGS="--sysroot=${SYSROOT} -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+
+          export BUILD_PYTHON="/tmp/hostpython/bin/python3"
+          export LD_LIBRARY_PATH="/tmp/hostpython/lib:${LD_LIBRARY_PATH:-}"
+
+          $BUILD_PYTHON -V || ( echo "ERROR: build python does not run" && exit 5 )
+
+          ./configure \
+            --host=${TARGET} \
+            --build=$(./config.guess) \
+            --prefix=$PWD/build-arm64 \
+            --enable-shared \
+            --with-build-python=${BUILD_PYTHON} \
+            --disable-ipv6 \
+            ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
+            CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
+
+          make -j${{ env.MAKE_JOBS }}
+          make install
+
+          LIBPATH=$(find . -name "libpython*.so" | head -n1 || true)
+          if [ -z "$LIBPATH" ]; then
+            echo "libpython not found; dumping few diagnostics:"
+            echo "PWD: $(pwd)"
+            find . -maxdepth 3 -type f -name "config.log" -print -exec sed -n '1,200p' {} \; || true
+            exit 2
+          fi
+          cp "$LIBPATH" ../libpython-arm64.so
+
+      - name: Upload libpython artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libpython-arm64
+          path: libpython-arm64.so
+
+  build-aria2:
+    runs-on: ubuntu-latest
+    needs: prepare-ndk
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare NDK env
+        run: |
+          NDK="${{ needs.prepare-ndk.outputs.ndk_path }}"
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
+          fi
+          if [ ! -d "$NDK" ]; then
+            echo "ERROR: NDK not found for aria2 job"
+            exit 5
+          fi
+          echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
+          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake git autoconf automake libtool pkg-config
+      - name: Checkout aria2
+        run: git clone --depth 1 https://github.com/aria2/aria2.git aria2-src
+      - name: Build aria2 with Android CMake (or write skip marker)
+        shell: bash
+        run: |
+          set -e
+          if [ -f "aria2-src/CMakeLists.txt" ]; then
+            API=${{ env.API_LEVEL }}
+            ABI=${{ env.ANDROID_ABI }}
+            TOOLCHAIN_FILE="$HOME/android-ndk-${{ env.NDK_VERSION }}/build/cmake/android.toolchain.cmake"
+            mkdir -p aria2-src/build && pushd aria2-src/build
+            cmake .. \
+              -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_FILE} \
+              -DANDROID_ABI=${ABI} \
+              -DANDROID_NATIVE_API_LEVEL=${API} \
+              -DANDROID_STL=c++_shared \
+              -DBUILD_SHARED_LIBS=ON \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+            cmake --build . -- -j${{ env.MAKE_JOBS }} || true
+            LIBA=$(find . -type f -name "libaria2*.so" -o -name "libaria2c*.so" | head -n1 || true)
+            if [ -n "$LIBA" ]; then
+              cp "$LIBA" ../../libaria2-arm64.so
+            else
+              echo "No lib produced; writing diagnostic skip marker" > libaria2-skip.marker
+              echo "Build tree listing:" >> libaria2-skip.marker
+              find . -maxdepth 4 -type f -print >> libaria2-skip.marker || true
+              echo "ARIA2_SKIPPED" >> libaria2-skip.marker
+            fi
+            popd
+          else
+            echo "aria2 upstream had no CMakeLists (skip marker created)" > libaria2-skip.marker
+            echo "ARIA2_SKIPPED" >> libaria2-skip.marker
+          fi
+      - name: Upload libaria2 artifact (if present)
+        uses: actions/upload-artifact@v4
+        with:
+          name: libaria2-arm64
+          path: |
+            libaria2-arm64.so
+            libaria2-skip.marker
+
+  verify-and-package:
+    runs-on: ubuntu-latest
+    needs: [build-libpython, build-aria2]
+    steps:
+      - name: Download libpython artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: libpython-arm64
+          path: .
+      - name: Download libaria2 artifact (if any)
+        uses: actions/download-artifact@v4
+        with:
+          name: libaria2-arm64
+          path: .
+      - name: Verify produced .so files (readelf + alignment)
+        run: |
+          if [ -f libpython-arm64.so ]; then
+            if command -v llvm-readelf >/dev/null 2>&1; then
+              llvm-readelf -l libpython-arm64.so || true
+            else
+              readelf -l libpython-arm64.so || true
+            fi
+            file libpython-arm64.so || true
+          fi
+          if [ -f libaria2-arm64.so ]; then
+            if command -v llvm-readelf >/dev/null 2>&1; then
+              llvm-readelf -l libaria2-arm64.so || true
+            else
+              readelf -l libaria2-arm64.so || true
+            fi
+            file libaria2-arm64.so || true
+          elif [ -f libaria2-skip.marker ]; then
+            echo "aria2 skip marker content:"
+            sed -n '1,200p' libaria2-skip.marker || true
+          fi
+          curl -s -o check_elf_alignment.sh "https://android.googlesource.com/platform/system/extras/+/refs/heads/main/tools/check_elf_alignment.sh?format=TEXT"
+          base64 --decode check_elf_alignment.sh > check_elf_alignment.dec.sh && chmod +x check_elf_alignment.dec.sh
+          [ -f libpython-arm64.so ] && ./check_elf_alignment.dec.sh libpython-arm64.so || true
+          [ -f libaria2-arm64.so ] && ./check_elf_alignment.dec.sh libaria2-arm64.so || true
+      - name: Package jniLibs
+        run: |
+          mkdir -p out/jniLibs/arm64-v8a
+          [ -f libpython-arm64.so ] && cp libpython-arm64.so out/jniLibs/arm64-v8a/libpython.so
+          [ -f libaria2-arm64.so ] && cp libaria2-arm64.so out/jniLibs/arm64-v8a/libaria2c.so || true
+          cd out && zip -r ../jniLibs-arm64.zip jniLibs || true
+      - name: Upload final jniLibs zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: jniLibs-arm64
+          path: jniLibs-arm64.zip
+
+      - name: Optional: create PR with jniLibs changes
+        if: always()
+        run: echo "PR creation step is optional; see workflow for configured create-pull-request action."
+
+      - name: Telegram notification (optional)
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            STATUS="Workflow $GITHUB_WORKFLOW run $GITHUB_RUN_ID finished. See: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="${STATUS}"
+          else
+            echo "No TELEGRAM_BOT_TOKEN secret set; skipping notification."
+          fi

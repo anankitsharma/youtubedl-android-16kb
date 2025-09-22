@@ -325,9 +325,48 @@ jobs:
           name: jniLibs-arm64
           path: jniLibs-arm64.zip
 
+      - name: Checkout repo to commit jniLibs
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Copy jniLibs into repo workspace and detect changes
+        id: copy-jni
+        run: |
+          BRANCH="auto/add-jniLibs-arm64-${GITHUB_RUN_ID}"
+          echo "BRANCH=${BRANCH}" >> $GITHUB_ENV
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          if [ -f libpython-arm64.so ]; then
+            cp libpython-arm64.so app/src/main/jniLibs/arm64-v8a/libpython.so
+          fi
+          if [ -f libaria2-arm64.so ]; then
+            cp libaria2-arm64.so app/src/main/jniLibs/arm64-v8a/libaria2c.so || cp libaria2-arm64.so app/src/main/jniLibs/arm64-v8a/libaria2.so || true
+          fi
+          git add -A || true
+          if git diff --cached --quiet; then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "no_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create a Pull Request with jniLibs changes (only if changed)
+        if: steps.copy-jni.outputs.no_changes == 'false'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "CI: add 16KB-aligned jniLibs (arm64) from run ${{ github.run_id }}"
+          branch: ${{ env.BRANCH }}
+          title: "Add 16KB-aligned jniLibs (arm64) — CI run ${{ github.run_id }}"
+          body: |
+            This PR adds generated `jniLibs/arm64-v8a` (libpython.so and optionally libaria2c.so)
+            produced by CI (16KB PT_LOAD aligned). The artifacts were built using Android NDK r28b.
+            Please review and merge to include these prebuilt binaries in the app.
+          labels: automatic, ci
+
       - name: Optional: create PR with jniLibs changes
         if: always()
-        run: echo "PR creation step is optional; see workflow for configured create-pull-request action."
+        run: |
+          echo "PR creation step is optional; see workflow for configured create-pull-request action."
 
       - name: Telegram notification (optional)
         if: always()

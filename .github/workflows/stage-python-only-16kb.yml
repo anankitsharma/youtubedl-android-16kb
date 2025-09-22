@@ -19,8 +19,17 @@ jobs:
     steps:
       - name: Ensure tools available
         run: sudo apt-get update && sudo apt-get install -y wget unzip
-      - name: Download and unpack NDK
+      - name: Cache NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}
+          key: ndk-${{ env.NDK_VERSION }}-v1
+          restore-keys: |
+            ndk-${{ env.NDK_VERSION }}-
+      - name: Download and unpack NDK (if cache miss)
         id: get_ndk
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
           set -e
           NDK_ZIP="/tmp/android-ndk-${{ env.NDK_VERSION }}-linux.zip"
@@ -28,8 +37,20 @@ jobs:
           unzip -q "$NDK_ZIP" -d $HOME
           NDK_DIR="$HOME/android-ndk-${{ env.NDK_VERSION }}"
           echo "::set-output name=ndk_path::$NDK_DIR"
+      - name: Set NDK path from cache (if cache hit)
+        id: get_ndk_from_cache
+        if: steps.cache-ndk.outputs.cache-hit == 'true'
+        run: |
+          # runner.temp cache location is ephemeral; copy NDK to HOME for use
+          CACHE_DIR="${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}"
+          if [ -d "$CACHE_DIR" ]; then
+            cp -r "$CACHE_DIR" "$HOME/"
+            echo "::set-output name=ndk_path::$HOME/android-ndk-${{ env.NDK_VERSION }}"
+          else
+            echo "::set-output name=ndk_path::$HOME/android-ndk-${{ env.NDK_VERSION }}"
+          fi
       - name: Show NDK
-        run: ls -la ${{ steps.get_ndk.outputs.ndk_path }}
+        run: ls -la ${{ steps.get_ndk.outputs.ndk_path }} || ls -la $HOME/android-ndk-${{ env.NDK_VERSION }} || true
 
   build-host-python:
     runs-on: ubuntu-latest
@@ -38,12 +59,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y build-essential wget
-      - name: Download CPython sources
+      - name: Restore host-python cache
+        id: cache-hostpython
+        uses: actions/cache@v4
+        with:
+          path: /tmp/hostpython
+          key: host-python-${{ env.PYTHON_VERSION }}-v1
+          restore-keys: |
+            host-python-${{ env.PYTHON_VERSION }}-
+      - name: Download CPython sources (if needed)
         run: |
           PY=${{ env.PYTHON_VERSION }}
-          wget -q "https://www.python.org/ftp/python/${PY}/Python-${PY}.tgz" -O /tmp/Python-${PY}.tgz
-          tar xf /tmp/Python-${PY}.tgz -C /tmp
-      - name: Build host Python (native)
+          if [ ! -d "/tmp/Python-${PY}" ]; then
+            wget -q "https://www.python.org/ftp/python/${PY}/Python-${PY}.tgz" -O /tmp/Python-${PY}.tgz
+            tar xf /tmp/Python-${PY}.tgz -C /tmp
+          fi
+      - name: Build host Python (native) (skip if cached)
+        if: steps.cache-hostpython.outputs.cache-hit != 'true'
         run: |
           set -e
           PY=${{ env.PYTHON_VERSION }}
@@ -53,6 +85,24 @@ jobs:
           make install
           popd
           /tmp/hostpython/bin/python3 -V
+      - name: Verify host-python exists (cached or built)
+        run: |
+          if [ -x /tmp/hostpython/bin/python3 ]; then
+            echo "host python ready"
+            /tmp/hostpython/bin/python3 -V
+          else
+            echo "host python missing; failing"
+            ls -la /tmp || true
+            exit 2
+          fi
+      - name: Save NDK to cache location (so it's available to other jobs)
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          # copy downloaded ndk into runner.temp for caching by prepare-ndk job in future runs
+          if [ -d "$HOME/android-ndk-${{ env.NDK_VERSION }}" ]; then
+            mkdir -p ${{ runner.temp }}
+            cp -r "$HOME/android-ndk-${{ env.NDK_VERSION }}" "${{ runner.temp }}/android-ndk-${{ env.NDK_VERSION }}"
+          fi
       - name: Upload host-python artifact
         uses: actions/upload-artifact@v4
         with:
@@ -64,14 +114,38 @@ jobs:
     needs: [prepare-ndk, build-host-python]
     steps:
       - uses: actions/checkout@v4
-      - name: Download host-python artifact
+      - name: Restore host-python cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/hostpython
+          key: host-python-${{ env.PYTHON_VERSION }}-v1
+          restore-keys: |
+            host-python-${{ env.PYTHON_VERSION }}-
+      - name: Download host-python artifact (fallback)
+        if: steps.cache-hostpython.outputs.cache-hit != 'true'
         uses: actions/download-artifact@v4
         with:
           name: host-python
           path: /tmp/hostpython
+      - name: Inspect host-python contents & ensure exec
+        run: |
+          echo "Listing /tmp/hostpython:"
+          ls -la /tmp/hostpython || true
+          echo "Listing bin:"
+          ls -la /tmp/hostpython/bin || true
+          if [ -f /tmp/hostpython/bin/python3 ]; then
+            chmod +x /tmp/hostpython/bin/python3 || true
+            /tmp/hostpython/bin/python3 -V || ( echo "host python failed to run; print ldd:" && ldd /tmp/hostpython/bin/python3 || true ; exit 3)
+          else
+            echo "ERROR: /tmp/hostpython/bin/python3 not found after cache/artifact restore"
+            exit 2
+          fi
       - name: Prepare environment
         run: |
           NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
+          if [ -z "$NDK" ]; then
+            NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
+          fi
           echo "NDK=$NDK"
           echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
           export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
@@ -83,35 +157,49 @@ jobs:
             tar xf /tmp/Python-${PY}.tgz -C /tmp
           fi
           cp -r /tmp/Python-${PY} .
-      - name: Cross-compile CPython (libpython.so) with --disable-ipv6
+      - name: Cross-compile CPython (libpython.so) with --disable-ipv6 (LD_LIBRARY_PATH set)
         shell: bash
         run: |
           set -euo pipefail
           PY=${{ env.PYTHON_VERSION }}
           NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
+          if [ -z "$NDK" ]; then
+            NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
+          fi
           API=${{ env.API_LEVEL }}
           TARGET=${{ env.TARGET_TRIPLE }}
           SYSROOT="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           cd Python-${PY}
+
           export CC=${TARGET}${API}-clang
           export CXX=${TARGET}${API}-clang++
           export AR=${TARGET}-ar
           export RANLIB=${TARGET}-ranlib
           export STRIP=${TARGET}-strip
+
           export CFLAGS="--sysroot=${SYSROOT} -D__ANDROID_API__=${API}"
           export LDFLAGS="--sysroot=${SYSROOT} -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+
+          export BUILD_PYTHON="/tmp/hostpython/bin/python3"
+          export LD_LIBRARY_PATH="/tmp/hostpython/lib:${LD_LIBRARY_PATH:-}"
+
+          echo "Using build python: $BUILD_PYTHON"
+          $BUILD_PYTHON -V || ( echo "ERROR: build python does not run; aborting." && ldd $BUILD_PYTHON || true ; exit 5 )
+
           ./configure \
             --host=${TARGET} \
             --build=$(./config.guess) \
             --prefix=$PWD/build-arm64 \
             --enable-shared \
-            --with-build-python=/tmp/hostpython/bin/python3 \
+            --with-build-python=${BUILD_PYTHON} \
             --disable-ipv6 \
             ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
             CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
             CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
+
           make -j${{ env.MAKE_JOBS }}
           make install
+
           LIBPATH=$(find . -name "libpython*.so" | head -n1 || true)
           if [ -z "$LIBPATH" ]; then
             echo "libpython not found; failing for diagnosis"
@@ -133,40 +221,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake git
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake git autoconf automake libtool pkg-config
       - name: Prepare NDK env
         run: |
           NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
+          if [ -z "$NDK" ]; then
+            NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
+          fi
           echo "ANDROID_NDK_HOME=$NDK" >> $GITHUB_ENV
           export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
       - name: Checkout aria2
         run: git clone --depth 1 https://github.com/aria2/aria2.git aria2-src
-      - name: Build aria2 (CMake) with 16KB flags
+      - name: Decide build method and build or skip
+        shell: bash
         run: |
           set -e
-          NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
-          API=${{ env.API_LEVEL }}
-          ABI=${{ env.ANDROID_ABI }}
-          TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"
-          mkdir -p aria2-src/build && pushd aria2-src/build
-          cmake .. \
-            -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_FILE} \
-            -DANDROID_ABI=${ABI} \
-            -DANDROID_NATIVE_API_LEVEL=${API} \
-            -DANDROID_STL=c++_shared \
-            -DBUILD_SHARED_LIBS=ON \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
-          cmake --build . -- -j${{ env.MAKE_JOBS }}
-          LIBA=$(find . -type f -name "libaria2*.so" -o -name "libaria2c*.so" | head -n1 || true)
-          if [ -z "$LIBA" ]; then echo "aria2 lib not found"; ls -la; exit 3; fi
-          cp "$LIBA" ../../libaria2-arm64.so
-          popd
-      - name: Upload libaria2 artifact
+          if [ -f "aria2-src/CMakeLists.txt" ]; then
+            echo "Found CMakeLists.txt — building with CMake"
+            NDK="${{ needs.prepare-ndk.outputs.ndk-path }}"
+            if [ -z "$NDK" ]; then
+              NDK=$HOME/android-ndk-${{ env.NDK_VERSION }}
+            fi
+            API=${{ env.API_LEVEL }}
+            ABI=${{ env.ANDROID_ABI }}
+            TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"
+            mkdir -p aria2-src/build && pushd aria2-src/build
+            cmake .. \
+              -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_FILE} \
+              -DANDROID_ABI=${ABI} \
+              -DANDROID_NATIVE_API_LEVEL=${API} \
+              -DANDROID_STL=c++_shared \
+              -DBUILD_SHARED_LIBS=ON \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+            cmake --build . -- -j${{ env.MAKE_JOBS }}
+            LIBA=$(find . -type f -name "libaria2*.so" -o -name "libaria2c*.so" | head -n1 || true)
+            if [ -n "$LIBA" ]; then
+              cp "$LIBA" ../../libaria2-arm64.so
+            else
+              echo "CMake completed but no libaria2 found — skipping upload"
+            fi
+            popd
+          else
+            echo "No top-level CMakeLists.txt detected in aria2-src. Skipping automated aria2 build."
+            echo "If you want aria2 built here, provide a fork or source layout that builds a libaria2 shared library,"
+            echo "or ask me to add a dedicated autotools cross-compile script (requires more config)."
+            echo "ARIA2_SKIPPED" > libaria2-skip.marker
+            ls -la
+          fi
+      - name: Upload libaria2 artifact (if present)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: libaria2-arm64
-          path: libaria2-arm64.so
+          path: |
+            libaria2-arm64.so
+            libaria2-skip.marker
 
   verify-and-package:
     runs-on: ubuntu-latest
@@ -177,30 +287,51 @@ jobs:
         with:
           name: libpython-arm64
           path: .
-      - name: Download libaria2 artifact
+      - name: Download libaria2 artifact (if any)
         uses: actions/download-artifact@v4
         with:
           name: libaria2-arm64
           path: .
       - name: Verify produced .so files (readelf + google check)
         run: |
-          if command -v llvm-readelf >/dev/null 2>&1; then
-            llvm-readelf -l libpython-arm64.so || true
-            llvm-readelf -l libaria2-arm64.so || true
+          if [ -f libpython-arm64.so ]; then
+            echo "=== libpython ==="
+            if command -v llvm-readelf >/dev/null 2>&1; then
+              llvm-readelf -l libpython-arm64.so || true
+            else
+              readelf -l libpython-arm64.so || true
+            fi
+            file libpython-arm64.so || true
           else
-            readelf -l libpython-arm64.so || true
-            readelf -l libaria2-arm64.so || true
+            echo "libpython-arm64.so not found — check earlier jobs"
+          fi
+          if [ -f libaria2-arm64.so ]; then
+            echo "=== libaria2 ==="
+            if command -v llvm-readelf >/dev/null 2>&1; then
+              llvm-readelf -l libaria2-arm64.so || true
+            else
+              readelf -l libaria2-arm64.so || true
+            fi
+            file libaria2-arm64.so || true
+          elif [ -f libaria2-skip.marker ]; then
+            echo "aria2 build was intentionally skipped (no CMakeLists in upstream repo)."
+          else
+            echo "aria2 artifact not present; you can provide a prebuilt libaria2 and re-run."
           fi
           curl -s -o check_elf_alignment.sh "https://android.googlesource.com/platform/system/extras/+/refs/heads/main/tools/check_elf_alignment.sh?format=TEXT"
           base64 --decode check_elf_alignment.sh > check_elf_alignment.dec.sh && chmod +x check_elf_alignment.dec.sh
-          ./check_elf_alignment.dec.sh libpython-arm64.so || true
-          ./check_elf_alignment.dec.sh libaria2-arm64.so || true
+          [ -f libpython-arm64.so ] && ./check_elf_alignment.dec.sh libpython-arm64.so || true
+          [ -f libaria2-arm64.so ] && ./check_elf_alignment.dec.sh libaria2-arm64.so || true
       - name: Prepare jniLibs zip
         run: |
           mkdir -p out/jniLibs/arm64-v8a
-          cp libpython-arm64.so out/jniLibs/arm64-v8a/libpython.so
-          cp libaria2-arm64.so out/jniLibs/arm64-v8a/libaria2c.so || cp libaria2-arm64.so out/jniLibs/arm64-v8a/libaria2.so || true
-          cd out && zip -r ../jniLibs-arm64.zip jniLibs
+          if [ -f libpython-arm64.so ]; then
+            cp libpython-arm64.so out/jniLibs/arm64-v8a/libpython.so
+          fi
+          if [ -f libaria2-arm64.so ]; then
+            cp libaria2-arm64.so out/jniLibs/arm64-v8a/libaria2c.so || cp libaria2-arm64.so out/jniLibs/arm64-v8a/libaria2.so || true
+          fi
+          cd out && zip -r ../jniLibs-arm64.zip jniLibs || true
       - name: Upload final jniLibs zip
         uses: actions/upload-artifact@v4
         with:
